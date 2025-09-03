@@ -457,7 +457,7 @@
         <select
           id="log-level"
           bind:value={settings.logLevel}
-          class="w-full mt-2 px-3 py-2 border rounded-lg bg-background"
+          class="w-full mt-2 px-3 py-2 border rounded-lg bg-background appearance-none"
         >
           <option value="error">Error</option>
           <option value="warn">Warning</option>

@@ -229,7 +229,7 @@
           <Label>Max Concurrent:</Label>
           <select 
             bind:value={maxConcurrentDownloads}
-            class="px-2 py-1 border rounded bg-background"
+            class="px-2 py-1 border rounded bg-background appearance-none"
           >
             <option value={1}>1</option>
             <option value={3}>3</option>

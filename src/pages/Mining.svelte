@@ -225,7 +225,7 @@
             id="pool-select"
             bind:value={miningPool}
             disabled={isMining}
-            class="w-full mt-2 px-3 py-2 border rounded-lg bg-background"
+            class="w-full mt-2 px-3 py-2 border rounded-lg bg-background appearance-none"
           >
             {#each pools as pool}
               <option value={pool.value}>{pool.label}</option>
