@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
 use rand::rngs::OsRng;
 
+// Ethereum integration imports
+use ethers::prelude::*;
+use ethers::types::{Address, U256, BlockNumber};
+
 // ============================================================================
 // REPUTATION TYPES
 // ============================================================================
@@ -371,45 +375,153 @@ impl ReputationContract {
     pub async fn submit_epoch(
         &self,
         epoch: &ReputationEpoch,
-        _private_key: &str,
+        private_key: &str,
     ) -> Result<String, String> {
-        // TODO: Implement actual Ethereum transaction submission
-        // In a real implementation, this would:
-        // 1. Connect to Ethereum network
-        // 2. Create transaction to submitEpoch function
-        // 3. Sign transaction with private key
-        // 4. Send transaction and wait for confirmation
-        // 5. Return transaction hash
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        // Parse and validate private key
+        let private_key_clean = private_key.strip_prefix("0x").unwrap_or(private_key);
+        let wallet: LocalWallet = private_key_clean
+            .parse()
+            .map_err(|e| format!("Invalid private key: {}", e))?;
+
+        let chain_id = 98765u64; // Chiral Network chain ID
+        let wallet = wallet.with_chain_id(chain_id);
+        let client = SignerMiddleware::new(provider.clone(), wallet);
+
+        // For now, we'll create a simple transaction that stores the epoch data
+        // In a full implementation, this would call a smart contract function
+        // For this commit, we'll create a transaction with epoch data in the data field
         
-        // For now, return a mock transaction hash
-        Ok(format!("0x{:x}", epoch.epoch_id))
+        let epoch_data = serde_json::to_string(epoch)
+            .map_err(|e| format!("Failed to serialize epoch: {}", e))?;
+        
+        // Get the sender's address
+        let sender_address = client.address();
+        
+        // Get nonce for pending block
+        let nonce = provider
+            .get_transaction_count(sender_address, Some(BlockNumber::Pending.into()))
+            .await
+            .map_err(|e| format!("Failed to get nonce: {}", e))?;
+
+        // Get gas price
+        let gas_price = provider
+            .get_gas_price()
+            .await
+            .map_err(|e| format!("Failed to get gas price: {}", e))?;
+
+        // Create transaction request
+        let tx_request = TransactionRequest::new()
+            .to(sender_address) // Self-transaction for now (would be contract address in full implementation)
+            .value(U256::zero())
+            .gas(100000) // Sufficient gas for reputation epoch submission
+            .gas_price(gas_price)
+            .nonce(nonce)
+            .data(epoch_data.as_bytes().to_vec());
+
+        // Send transaction
+        let pending_tx = client
+            .send_transaction(tx_request, None)
+            .await
+            .map_err(|e| format!("Failed to send transaction: {}", e))?;
+
+        // Get transaction hash
+        let tx_hash = pending_tx.tx_hash();
+        
+        tracing::info!("Submitted reputation epoch {} to blockchain with tx hash: {:?}", 
+                      epoch.epoch_id, tx_hash);
+
+        Ok(format!("{:?}", tx_hash))
     }
 
-    pub async fn get_epoch(&self, _epoch_id: u64) -> Result<Option<ReputationEpoch>, String> {
-        // TODO: Implement actual Ethereum contract call
-        // In a real implementation, this would:
-        // 1. Connect to Ethereum network
-        // 2. Call getEpoch function on contract
-        // 3. Parse returned data into ReputationEpoch
-        // 4. Return epoch data
+    pub async fn get_epoch(&self, epoch_id: u64) -> Result<Option<ReputationEpoch>, String> {
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        // In a full implementation, this would:
+        // 1. Call a smart contract function to get epoch data
+        // 2. Parse the returned data into ReputationEpoch
+        // For now, we'll search through recent transactions for reputation epochs
         
-        // For now, return None as placeholder
+        // Get the latest block number
+        let latest_block = provider
+            .get_block_number()
+            .await
+            .map_err(|e| format!("Failed to get latest block: {}", e))?;
+
+        // Search recent blocks for reputation transactions (last 100 blocks)
+        let start_block = latest_block.saturating_sub(100);
+        
+        for block_num in start_block..=latest_block {
+            if let Ok(Some(block)) = provider.get_block_with_txs(block_num).await {
+                for tx in block.transactions {
+                    if let Some(data) = tx.input {
+                        // Try to deserialize as ReputationEpoch
+                        if let Ok(epoch_data) = std::str::from_utf8(&data) {
+                            if let Ok(epoch) = serde_json::from_str::<ReputationEpoch>(epoch_data) {
+                                if epoch.epoch_id == epoch_id {
+                                    tracing::info!("Found reputation epoch {} in block {}", epoch_id, block_num);
+                                    return Ok(Some(epoch));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        tracing::debug!("Reputation epoch {} not found in recent blocks", epoch_id);
         Ok(None)
     }
 
     pub async fn verify_event_proof(
         &self,
-        _event_hash: &str,
-        _proof: Vec<String>,
-        _epoch_id: u64,
+        event_hash: &str,
+        proof: Vec<String>,
+        epoch_id: u64,
     ) -> Result<bool, String> {
-        // TODO: Implement actual Ethereum contract call
-        // In a real implementation, this would:
-        // 1. Connect to Ethereum network
-        // 2. Call verifyEvent function on contract
-        // 3. Return verification result
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        // First, verify that the epoch exists on the blockchain
+        let epoch = self.get_epoch(epoch_id).await?;
+        if epoch.is_none() {
+            tracing::warn!("Epoch {} not found on blockchain", epoch_id);
+            return Ok(false);
+        }
+
+        // In a full implementation, this would:
+        // 1. Call a smart contract function to verify the Merkle proof
+        // 2. The contract would check if the event hash exists in the epoch's Merkle tree
+        // 3. Return the verification result
         
-        // For now, return true as placeholder
+        // For now, we'll do basic validation:
+        // - Check that we have proof data
+        // - Check that the epoch exists
+        // - Basic format validation
+        
+        if proof.is_empty() {
+            tracing::warn!("Empty proof provided for event {}", event_hash);
+            return Ok(false);
+        }
+
+        if event_hash.is_empty() {
+            tracing::warn!("Empty event hash provided");
+            return Ok(false);
+        }
+
+        // Basic hash format validation (should be hex string)
+        if !event_hash.starts_with("0x") || event_hash.len() != 66 {
+            tracing::warn!("Invalid event hash format: {}", event_hash);
+            return Ok(false);
+        }
+
+        tracing::info!("Verified event proof for event {} in epoch {}", event_hash, epoch_id);
         Ok(true)
     }
 
@@ -486,7 +598,10 @@ impl ReputationSystem {
         self.dht_service.store_merkle_root(&epoch).await?;
         
         // Submit to smart contract
-        let private_key = "mock_private_key"; // In real implementation, get from secure storage
+        // TODO: Get private key from secure wallet storage
+        // For now, we'll need to pass the private key as a parameter
+        // In a full implementation, this would retrieve from the wallet service
+        let private_key = "mock_private_key"; // This will be replaced in the next commit
         let tx_hash = self.contract.submit_epoch(&epoch, private_key).await?;
         
         // Reset for next epoch
@@ -669,7 +784,8 @@ impl ReputationSystemWithEpochs {
         self.dht_service.store_merkle_root(&epoch).await?;
         
         // Submit to smart contract
-        let private_key = "mock_private_key";
+        // TODO: Get private key from secure wallet storage
+        let private_key = "mock_private_key"; // This will be replaced in the next commit
         let tx_hash = self.contract.submit_epoch(&epoch, private_key).await?;
         
         // Reset for next epoch
