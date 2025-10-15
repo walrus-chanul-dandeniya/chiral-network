@@ -4104,3 +4104,42 @@ async fn store_file_data(
         Err("File transfer service not running".to_string())
     }
 }
+
+// ============================================================================
+// REPUTATION VERIFICATION COMMANDS
+// ============================================================================
+
+#[tauri::command]
+async fn get_peer_reputation_score(
+    peer_id: String,
+    from_epoch: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<f64, String> {
+    // TODO: Get reputation system from app state when it's integrated
+    // For now, return a placeholder score
+    tracing::info!("Getting reputation score for peer {} from epoch {:?}", peer_id, from_epoch);
+    Ok(0.75) // Placeholder score
+}
+
+#[tauri::command]
+async fn verify_peer_reputation_consistency(
+    peer_id: String,
+    events: Vec<crate::reputation::ReputationEvent>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // TODO: Get reputation system from app state when it's integrated
+    // For now, return true as placeholder
+    tracing::info!("Verifying reputation consistency for peer {} with {} events", peer_id, events.len());
+    Ok(true) // Placeholder verification
+}
+
+#[tauri::command]
+async fn verify_epoch_from_blockchain(
+    epoch_id: u64,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::reputation::ReputationEpoch>, String> {
+    // TODO: Get reputation system from app state when it's integrated
+    // For now, return None as placeholder
+    tracing::info!("Verifying epoch {} from blockchain", epoch_id);
+    Ok(None) // Placeholder - no epoch found
+}

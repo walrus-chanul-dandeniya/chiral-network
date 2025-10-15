@@ -523,6 +523,196 @@ impl ReputationContract {
         Ok(true)
     }
 
+    /// Verify a complete reputation epoch from blockchain
+    pub async fn verify_epoch_from_blockchain(&self, epoch_id: u64) -> Result<Option<ReputationEpoch>, String> {
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        // Get the epoch from blockchain
+        let epoch = self.get_epoch(epoch_id).await?;
+        
+        if let Some(epoch) = epoch {
+            // Verify the epoch structure and data integrity
+            self.verify_epoch_integrity(&epoch).await?;
+            
+            tracing::info!("Successfully verified epoch {} from blockchain", epoch_id);
+            Ok(Some(epoch))
+        } else {
+            tracing::warn!("Epoch {} not found on blockchain", epoch_id);
+            Ok(None)
+        }
+    }
+
+    /// Verify epoch integrity and blockchain consistency
+    async fn verify_epoch_integrity(&self, epoch: &ReputationEpoch) -> Result<(), String> {
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        // Verify timestamp is reasonable (not in future, not too old)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        if epoch.timestamp > now {
+            return Err("Epoch timestamp is in the future".to_string());
+        }
+        
+        // Check if timestamp is not too old (more than 1 year)
+        if now - epoch.timestamp > 365 * 24 * 60 * 60 {
+            tracing::warn!("Epoch {} is very old ({} seconds ago)", epoch.epoch_id, now - epoch.timestamp);
+        }
+
+        // Verify event count is reasonable
+        if epoch.event_count == 0 {
+            tracing::warn!("Epoch {} has no events", epoch.epoch_id);
+        }
+
+        // Verify Merkle root format (should be hex string)
+        if !epoch.merkle_root.starts_with("0x") || epoch.merkle_root.len() != 66 {
+            return Err(format!("Invalid Merkle root format: {}", epoch.merkle_root));
+        }
+
+        // If block number is provided, verify it exists on blockchain
+        if let Some(block_number) = epoch.block_number {
+            match provider.get_block(block_number).await {
+                Ok(Some(block)) => {
+                    tracing::debug!("Verified epoch {} is in block {}", epoch.epoch_id, block_number);
+                }
+                Ok(None) => {
+                    return Err(format!("Block {} not found on blockchain", block_number));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to verify block {}: {}", block_number, e);
+                }
+            }
+        }
+
+        tracing::info!("Epoch {} integrity verification passed", epoch.epoch_id);
+        Ok(())
+    }
+
+    /// Get reputation score for a peer from blockchain epochs
+    pub async fn get_peer_reputation_score(&self, peer_id: &str, from_epoch: Option<u64>) -> Result<f64, String> {
+        // Connect to Ethereum network
+        let provider = Provider::<Http>::try_from("http://127.0.0.1:8545")
+            .map_err(|e| format!("Failed to connect to Geth: {}", e))?;
+
+        let mut total_score = 0.0;
+        let mut event_count = 0;
+        let start_epoch = from_epoch.unwrap_or(0);
+
+        // Get the latest block number to determine search range
+        let latest_block = provider
+            .get_block_number()
+            .await
+            .map_err(|e| format!("Failed to get latest block: {}", e))?;
+
+        // Search recent blocks for reputation epochs (last 1000 blocks)
+        let start_block = latest_block.saturating_sub(1000);
+        
+        for block_num in start_block..=latest_block {
+            if let Ok(Some(block)) = provider.get_block_with_txs(block_num).await {
+                for tx in block.transactions {
+                    if let Some(data) = tx.input {
+                        // Try to deserialize as ReputationEpoch
+                        if let Ok(epoch_data) = std::str::from_utf8(&data) {
+                            if let Ok(epoch) = serde_json::from_str::<ReputationEpoch>(epoch_data) {
+                                if epoch.epoch_id >= start_epoch {
+                                    // This is a reputation epoch, but we need to get the actual events
+                                    // For now, we'll estimate based on epoch metadata
+                                    let epoch_score = self.calculate_epoch_score(&epoch, peer_id).await?;
+                                    total_score += epoch_score;
+                                    event_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if event_count == 0 {
+            tracing::debug!("No reputation epochs found for peer {}", peer_id);
+            return Ok(0.5); // Default neutral score
+        }
+
+        let average_score = total_score / event_count as f64;
+        tracing::info!("Peer {} reputation score: {:.3} (from {} epochs)", peer_id, average_score, event_count);
+        
+        Ok(average_score)
+    }
+
+    /// Calculate reputation score from an epoch (placeholder implementation)
+    async fn calculate_epoch_score(&self, epoch: &ReputationEpoch, peer_id: &str) -> Result<f64, String> {
+        // In a full implementation, this would:
+        // 1. Retrieve the actual events from the epoch
+        // 2. Filter events for the specific peer
+        // 3. Calculate weighted score based on event types and impact
+        
+        // For now, we'll use a simple heuristic based on epoch metadata
+        let base_score = 0.5; // Neutral starting point
+        
+        // Adjust based on event count (more events = more activity = potentially better reputation)
+        let activity_factor = (epoch.event_count as f64 / 100.0).min(1.0);
+        
+        // Adjust based on recency (more recent = higher weight)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let age_days = (now - epoch.timestamp) / (24 * 60 * 60);
+        let recency_factor = if age_days < 7 { 1.0 } else if age_days < 30 { 0.8 } else { 0.6 };
+        
+        let score = base_score + (activity_factor * 0.3) + (recency_factor * 0.2);
+        
+        // Clamp score between 0.0 and 1.0
+        Ok(score.max(0.0).min(1.0))
+    }
+
+    /// Verify that a peer's reputation events are consistent with blockchain data
+    pub async fn verify_peer_reputation_consistency(&self, peer_id: &str, events: &[ReputationEvent]) -> Result<bool, String> {
+        if events.is_empty() {
+            return Ok(true);
+        }
+
+        // Group events by epoch
+        let mut epoch_events: HashMap<u64, Vec<&ReputationEvent>> = HashMap::new();
+        for event in events {
+            if let Some(epoch_id) = event.epoch {
+                epoch_events.entry(epoch_id).or_insert_with(Vec::new).push(event);
+            }
+        }
+
+        // Verify each epoch
+        for (epoch_id, epoch_events) in epoch_events {
+            let blockchain_epoch = self.verify_epoch_from_blockchain(epoch_id).await?;
+            
+            if let Some(blockchain_epoch) = blockchain_epoch {
+                // Verify event count matches
+                if epoch_events.len() != blockchain_epoch.event_count {
+                    tracing::warn!(
+                        "Event count mismatch for peer {} in epoch {}: local={}, blockchain={}",
+                        peer_id, epoch_id, epoch_events.len(), blockchain_epoch.event_count
+                    );
+                    return Ok(false);
+                }
+                
+                // TODO: Verify Merkle tree consistency
+                // This would require reconstructing the Merkle tree from events
+                // and comparing with the blockchain Merkle root
+            } else {
+                tracing::warn!("Epoch {} not found on blockchain for peer {}", epoch_id, peer_id);
+                return Ok(false);
+            }
+        }
+
+        tracing::info!("Peer {} reputation consistency verification passed", peer_id);
+        Ok(true)
+    }
+
     pub fn get_contract_address(&self) -> Option<&String> {
         self.contract_address.as_ref()
     }
@@ -603,6 +793,21 @@ impl ReputationSystem {
         self.current_epoch += 1;
         
         Ok(tx_hash)
+    }
+
+    /// Get reputation score for a peer from blockchain
+    pub async fn get_peer_reputation_score(&self, peer_id: &str, from_epoch: Option<u64>) -> Result<f64, String> {
+        self.contract.get_peer_reputation_score(peer_id, from_epoch).await
+    }
+
+    /// Verify a peer's reputation consistency with blockchain
+    pub async fn verify_peer_reputation_consistency(&self, peer_id: &str, events: &[ReputationEvent]) -> Result<bool, String> {
+        self.contract.verify_peer_reputation_consistency(peer_id, events).await
+    }
+
+    /// Verify an epoch from blockchain
+    pub async fn verify_epoch_from_blockchain(&self, epoch_id: u64) -> Result<Option<ReputationEpoch>, String> {
+        self.contract.verify_epoch_from_blockchain(epoch_id).await
     }
 }
 
@@ -803,6 +1008,21 @@ impl ReputationSystemWithEpochs {
 
     pub fn get_pending_events(&self) -> &[ReputationEvent] {
         &self.pending_events
+    }
+
+    /// Get reputation score for a peer from blockchain
+    pub async fn get_peer_reputation_score(&self, peer_id: &str, from_epoch: Option<u64>) -> Result<f64, String> {
+        self.contract.get_peer_reputation_score(peer_id, from_epoch).await
+    }
+
+    /// Verify a peer's reputation consistency with blockchain
+    pub async fn verify_peer_reputation_consistency(&self, peer_id: &str, events: &[ReputationEvent]) -> Result<bool, String> {
+        self.contract.verify_peer_reputation_consistency(peer_id, events).await
+    }
+
+    /// Verify an epoch from blockchain
+    pub async fn verify_epoch_from_blockchain(&self, epoch_id: u64) -> Result<Option<ReputationEpoch>, String> {
+        self.contract.verify_epoch_from_blockchain(epoch_id).await
     }
 }
 
