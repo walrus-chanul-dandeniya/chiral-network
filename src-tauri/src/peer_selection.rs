@@ -255,8 +255,9 @@ impl PeerSelectionService {
 
     /// Set the active private key for blockchain transactions
     pub fn set_active_private_key(&mut self, private_key: Option<String>) {
+        let has_key = private_key.is_some();
         self.active_private_key = private_key;
-        if private_key.is_some() {
+        if has_key {
             info!("Peer selection service updated with active private key for blockchain transactions");
         } else {
             info!("Peer selection service cleared active private key");
@@ -310,7 +311,7 @@ impl PeerSelectionService {
             .as_secs();
 
         self.blockchain_reputation_cache.retain(|_, (_, timestamp)| {
-            now - timestamp < self.cache_duration_seconds
+            now - *timestamp < self.cache_duration_seconds
         });
     }
 
@@ -358,7 +359,7 @@ impl PeerSelectionService {
                         );
 
                         let mut rep_system = rep_system.lock().await;
-                        if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                        if let Err(e) = rep_system.add_reputation_event(event).await {
                             warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
                         } else {
                             debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
@@ -403,7 +404,7 @@ impl PeerSelectionService {
                         );
 
                         let mut rep_system = rep_system.lock().await;
-                        if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                        if let Err(e) = rep_system.add_reputation_event(event).await {
                             warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
                         } else {
                             debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
@@ -452,7 +453,7 @@ impl PeerSelectionService {
                     );
 
                     let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                    if let Err(e) = rep_system.add_reputation_event(event).await {
                         warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
                     } else {
                         debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
@@ -494,7 +495,7 @@ impl PeerSelectionService {
                     );
 
                     let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                    if let Err(e) = rep_system.add_reputation_event(event).await {
                         warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
                     } else {
                         debug!("Created reputation event for peer {}: ConnectionLost", peer_id);

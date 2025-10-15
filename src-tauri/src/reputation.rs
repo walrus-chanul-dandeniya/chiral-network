@@ -454,10 +454,14 @@ impl ReputationContract {
         // Search recent blocks for reputation transactions (last 100 blocks)
         let start_block = latest_block.saturating_sub(100);
         
-        for block_num in start_block..=latest_block {
-            if let Ok(Some(block)) = provider.get_block_with_txs(block_num).await {
+        let start = start_block.as_u64();
+        let end = latest_block.as_u64();
+        for block_num in start..=end {
+            let block_number = U64::from(block_num);
+            if let Ok(Some(block)) = provider.get_block_with_txs(block_number).await {
                 for tx in block.transactions {
-                    if let Some(data) = tx.input {
+                    if !tx.input.is_empty() {
+                        let data = &tx.input;
                         // Try to deserialize as ReputationEpoch
                         if let Ok(epoch_data) = std::str::from_utf8(&data) {
                             if let Ok(epoch) = serde_json::from_str::<ReputationEpoch>(epoch_data) {
@@ -1126,8 +1130,8 @@ impl ReputationTestSuite {
             -0.3,
         );
 
-        let result1 = system.add_reputation_event(event1.clone()).await;
-        let result2 = system.add_reputation_event(event2.clone()).await;
+        let result1 = system.add_reputation_event(event1.clone(), "test_private_key").await;
+        let result2 = system.add_reputation_event(event2.clone(), "test_private_key").await;
         
         results.add_test("Add Events", result1.is_ok() && result2.is_ok(), "Events added successfully");
         
@@ -1147,7 +1151,7 @@ impl ReputationTestSuite {
         results.add_test("Signature Verification", signature_verified, "All event signatures verified");
         
         // Test 5: Finalize epoch
-        let finalize_result = system.finalize_current_epoch().await;
+        let finalize_result = system.finalize_current_epoch("test_private_key").await;
         results.add_test("Epoch Finalization", finalize_result.is_ok(), "Epoch finalized successfully");
         
         // Test 6: Verify epoch advancement
@@ -1179,13 +1183,13 @@ impl ReputationTestSuite {
         
         let add_start = SystemTime::now();
         for event in events {
-            system.add_reputation_event(event).await?;
+            system.add_reputation_event(event, "test_private_key").await?;
         }
         let add_duration = add_start.elapsed().unwrap_or_default();
         
         // Finalize epoch
         let finalize_start = SystemTime::now();
-        system.finalize_current_epoch().await?;
+        system.finalize_current_epoch("test_private_key").await?;
         let finalize_duration = finalize_start.elapsed().unwrap_or_default();
         
         let total_duration = start_time.elapsed().unwrap_or_default();
