@@ -574,7 +574,7 @@ impl ReputationSystem {
         Ok(())
     }
 
-    pub async fn finalize_epoch(&mut self) -> Result<String, String> {
+    pub async fn finalize_epoch(&mut self, private_key: &str) -> Result<String, String> {
         let epoch_id = self.current_epoch;
         let merkle_root = self.merkle_tree.get_root_hex()
             .ok_or("No events in current epoch")?;
@@ -595,11 +595,7 @@ impl ReputationSystem {
         // Store epoch in DHT
         self.dht_service.store_merkle_root(&epoch).await?;
         
-        // Submit to smart contract
-        // TODO: Get private key from secure wallet storage
-        // For now, we'll need to pass the private key as a parameter
-        // In a full implementation, this would retrieve from the wallet service
-        let private_key = "mock_private_key"; // This will be replaced in the next commit
+        // Submit to smart contract with provided private key
         let tx_hash = self.contract.submit_epoch(&epoch, private_key).await?;
         
         // Reset for next epoch
@@ -731,7 +727,7 @@ impl ReputationSystemWithEpochs {
         self.contract.set_contract_address(address);
     }
 
-    pub async fn add_reputation_event(&mut self, mut event: ReputationEvent) -> Result<Option<String>, String> {
+    pub async fn add_reputation_event(&mut self, mut event: ReputationEvent, private_key: &str) -> Result<Option<String>, String> {
         // Set epoch for the event
         event.epoch = Some(self.epoch_manager.get_current_epoch());
         
@@ -749,14 +745,14 @@ impl ReputationSystemWithEpochs {
         
         // Check if epoch should be finalized
         if self.epoch_manager.should_finalize_epoch(self.pending_events.len()) {
-            let tx_hash = self.finalize_current_epoch().await?;
+            let tx_hash = self.finalize_current_epoch(private_key).await?;
             return Ok(Some(tx_hash));
         }
         
         Ok(None)
     }
 
-    pub async fn finalize_current_epoch(&mut self) -> Result<String, String> {
+    pub async fn finalize_current_epoch(&mut self, private_key: &str) -> Result<String, String> {
         if self.pending_events.is_empty() {
             return Err("No events to finalize".to_string());
         }
@@ -781,16 +777,14 @@ impl ReputationSystemWithEpochs {
         // Store epoch in DHT
         self.dht_service.store_merkle_root(&epoch).await?;
         
-        // Submit to smart contract
-        // TODO: Get private key from secure wallet storage
-        let private_key = "mock_private_key"; // This will be replaced in the next commit
+        // Submit to smart contract with provided private key
         let tx_hash = self.contract.submit_epoch(&epoch, private_key).await?;
         
         // Reset for next epoch
         self.merkle_tree = ReputationMerkleTree::new();
         self.pending_events.clear();
         self.epoch_manager.advance_epoch();
-        
+
         Ok(tx_hash)
     }
 

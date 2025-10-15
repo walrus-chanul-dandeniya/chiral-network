@@ -228,6 +228,7 @@ pub struct PeerSelectionService {
     metrics: HashMap<String, PeerMetrics>,
     selection_history: HashMap<String, u64>, // peer_id -> last_selected_timestamp
     reputation_system: Option<Arc<tokio::sync::Mutex<ReputationSystem>>>, // Optional blockchain reputation system
+    active_private_key: Option<String>, // Current active private key for blockchain transactions
 }
 
 impl PeerSelectionService {
@@ -236,6 +237,7 @@ impl PeerSelectionService {
             metrics: HashMap::new(),
             selection_history: HashMap::new(),
             reputation_system: None,
+            active_private_key: None,
         }
     }
 
@@ -243,6 +245,16 @@ impl PeerSelectionService {
     pub fn set_reputation_system(&mut self, reputation_system: Arc<tokio::sync::Mutex<ReputationSystem>>) {
         self.reputation_system = Some(reputation_system);
         info!("Peer selection service connected to blockchain reputation system");
+    }
+
+    /// Set the active private key for blockchain transactions
+    pub fn set_active_private_key(&mut self, private_key: Option<String>) {
+        self.active_private_key = private_key;
+        if private_key.is_some() {
+            info!("Peer selection service updated with active private key for blockchain transactions");
+        } else {
+            info!("Peer selection service cleared active private key");
+        }
     }
 
 
@@ -271,28 +283,33 @@ impl PeerSelectionService {
 
             // Spawn async task for reputation event creation
             if let Some(ref rep_system) = self.reputation_system {
-                let peer_id = peer_id.to_string();
-                let rep_system = rep_system.clone();
-                tokio::spawn(async move {
-                    let event = ReputationEvent::new(
-                        format!("event_{}_{}", peer_id, SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis()),
-                        peer_id.clone(),
-                        "local_node".to_string(),
-                        EventType::FileTransferSuccess,
-                        transfer_data,
-                        1.0,
-                    );
+                if let Some(ref private_key) = self.active_private_key {
+                    let peer_id = peer_id.to_string();
+                    let private_key = private_key.clone();
+                    let rep_system = rep_system.clone();
+                    tokio::spawn(async move {
+                        let event = ReputationEvent::new(
+                            format!("event_{}_{}", peer_id, SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()),
+                            peer_id.clone(),
+                            "local_node".to_string(),
+                            EventType::FileTransferSuccess,
+                            transfer_data,
+                            1.0,
+                        );
 
-                    let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event).await {
-                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                    } else {
-                        debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
-                    }
-                });
+                        let mut rep_system = rep_system.lock().await;
+                        if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                        } else {
+                            debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
+                        }
+                    });
+                } else {
+                    warn!("No active private key available for reputation event creation");
+                }
             }
         }
     }
@@ -311,28 +328,33 @@ impl PeerSelectionService {
 
             // Spawn async task for reputation event creation
             if let Some(ref rep_system) = self.reputation_system {
-                let peer_id = peer_id.to_string();
-                let rep_system = rep_system.clone();
-                tokio::spawn(async move {
-                    let event = ReputationEvent::new(
-                        format!("event_{}_{}", peer_id, SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis()),
-                        peer_id.clone(),
-                        "local_node".to_string(),
-                        EventType::FileTransferFailure,
-                        failure_data,
-                        1.0,
-                    );
+                if let Some(ref private_key) = self.active_private_key {
+                    let peer_id = peer_id.to_string();
+                    let private_key = private_key.clone();
+                    let rep_system = rep_system.clone();
+                    tokio::spawn(async move {
+                        let event = ReputationEvent::new(
+                            format!("event_{}_{}", peer_id, SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()),
+                            peer_id.clone(),
+                            "local_node".to_string(),
+                            EventType::FileTransferFailure,
+                            failure_data,
+                            1.0,
+                        );
 
-                    let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event).await {
-                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                    } else {
-                        debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
-                    }
-                });
+                        let mut rep_system = rep_system.lock().await;
+                        if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                        } else {
+                            debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
+                        }
+                    });
+                } else {
+                    warn!("No active private key available for reputation event creation");
+                }
             }
         }
     }
@@ -355,28 +377,33 @@ impl PeerSelectionService {
 
         // Spawn async task for reputation event creation
         if let Some(ref rep_system) = self.reputation_system {
-            let peer_id = peer_id.to_string();
-            let rep_system = rep_system.clone();
-            tokio::spawn(async move {
-                let event = ReputationEvent::new(
-                    format!("event_{}_{}", peer_id, SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()),
-                    peer_id.clone(),
-                    "local_node".to_string(),
-                    EventType::ConnectionEstablished,
-                    connection_data,
-                    1.0,
-                );
+            if let Some(ref private_key) = self.active_private_key {
+                let peer_id = peer_id.to_string();
+                let private_key = private_key.clone();
+                let rep_system = rep_system.clone();
+                tokio::spawn(async move {
+                    let event = ReputationEvent::new(
+                        format!("event_{}_{}", peer_id, SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()),
+                        peer_id.clone(),
+                        "local_node".to_string(),
+                        EventType::ConnectionEstablished,
+                        connection_data,
+                        1.0,
+                    );
 
-                let mut rep_system = rep_system.lock().await;
-                if let Err(e) = rep_system.add_reputation_event(event).await {
-                    warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                } else {
-                    debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
-                }
-            });
+                    let mut rep_system = rep_system.lock().await;
+                    if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                    } else {
+                        debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
+                    }
+                });
+            } else {
+                warn!("No active private key available for reputation event creation");
+            }
         }
 
         info!("Recorded connection established for peer {} at {}", peer_id, address);
@@ -392,28 +419,33 @@ impl PeerSelectionService {
 
         // Spawn async task for reputation event creation
         if let Some(ref rep_system) = self.reputation_system {
-            let peer_id = peer_id.to_string();
-            let rep_system = rep_system.clone();
-            tokio::spawn(async move {
-                let event = ReputationEvent::new(
-                    format!("event_{}_{}", peer_id, SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()),
-                    peer_id.clone(),
-                    "local_node".to_string(),
-                    EventType::ConnectionLost,
-                    connection_data,
-                    1.0,
-                );
+            if let Some(ref private_key) = self.active_private_key {
+                let peer_id = peer_id.to_string();
+                let private_key = private_key.clone();
+                let rep_system = rep_system.clone();
+                tokio::spawn(async move {
+                    let event = ReputationEvent::new(
+                        format!("event_{}_{}", peer_id, SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()),
+                        peer_id.clone(),
+                        "local_node".to_string(),
+                        EventType::ConnectionLost,
+                        connection_data,
+                        1.0,
+                    );
 
-                let mut rep_system = rep_system.lock().await;
-                if let Err(e) = rep_system.add_reputation_event(event).await {
-                    warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                } else {
-                    debug!("Created reputation event for peer {}: ConnectionLost", peer_id);
-                }
-            });
+                    let mut rep_system = rep_system.lock().await;
+                    if let Err(e) = rep_system.add_reputation_event(event, &private_key).await {
+                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                    } else {
+                        debug!("Created reputation event for peer {}: ConnectionLost", peer_id);
+                    }
+                });
+            } else {
+                warn!("No active private key available for reputation event creation");
+            }
         }
 
         warn!("Recorded connection lost for peer {}: {}", peer_id, reason);
