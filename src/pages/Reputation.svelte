@@ -140,6 +140,7 @@
 
       // Load blockchain analytics
       blockchainAnalytics = BlockchainReputationService.createMockBlockchainReputationAnalytics();
+      console.log('Blockchain analytics created:', blockchainAnalytics);
     } catch (e) {
       console.error('Failed to load peer metrics', e);
       peers = [];
@@ -256,10 +257,10 @@
           <Button on:click={() => showAnalytics = !showAnalytics} variant="outline" class="w-full sm:w-auto">
             {showAnalytics ? $t('reputation.hideAnalytics') : $t('reputation.showAnalytics')}
           </Button>
-          <Button on:click={() => showBlockchainAnalytics = !showBlockchainAnalytics} variant="outline" class="w-full sm:w-auto">
+          <Button on:click={() => { console.log('Blockchain Analytics clicked, current:', showBlockchainAnalytics); showBlockchainAnalytics = !showBlockchainAnalytics; }} variant="outline" class="w-full sm:w-auto">
             {showBlockchainAnalytics ? 'Hide Blockchain Analytics' : 'Show Blockchain Analytics'}
           </Button>
-          <Button on:click={() => showBlockchainReputation = !showBlockchainReputation} variant="outline" class="w-full sm:w-auto">
+          <Button on:click={() => { console.log('Blockchain Reputation clicked, current:', showBlockchainReputation); showBlockchainReputation = !showBlockchainReputation; }} variant="outline" class="w-full sm:w-auto">
             {showBlockchainReputation ? 'Hide Blockchain Reputation' : 'Show Blockchain Reputation'}
           </Button>
         </div>
@@ -286,6 +287,10 @@
       {#if showBlockchainAnalytics && blockchainAnalytics}
         <div class="mb-8">
           <BlockchainReputationAnalyticsComponent analytics={blockchainAnalytics} />
+        </div>
+      {:else if showBlockchainAnalytics}
+        <div class="mb-8 p-4 bg-yellow-100 border border-yellow-300 rounded">
+          <p>Blockchain Analytics: showBlockchainAnalytics={showBlockchainAnalytics}, blockchainAnalytics={JSON.stringify(blockchainAnalytics)}</p>
         </div>
       {/if}
 
