@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+
+// Import reputation system for blockchain integration
+use crate::reputation::{ReputationEvent, EventType, ReputationSystem};
 
 /// Peer performance metrics used for smart selection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +227,7 @@ pub enum SelectionStrategy {
 pub struct PeerSelectionService {
     metrics: HashMap<String, PeerMetrics>,
     selection_history: HashMap<String, u64>, // peer_id -> last_selected_timestamp
+    reputation_system: Option<Arc<tokio::sync::Mutex<ReputationSystem>>>, // Optional blockchain reputation system
 }
 
 impl PeerSelectionService {
@@ -230,8 +235,16 @@ impl PeerSelectionService {
         Self {
             metrics: HashMap::new(),
             selection_history: HashMap::new(),
+            reputation_system: None,
         }
     }
+
+    /// Set the blockchain reputation system for automatic event creation
+    pub fn set_reputation_system(&mut self, reputation_system: Arc<tokio::sync::Mutex<ReputationSystem>>) {
+        self.reputation_system = Some(reputation_system);
+        info!("Peer selection service connected to blockchain reputation system");
+    }
+
 
     /// Add or update a peer's metrics
     pub fn update_peer_metrics(&mut self, metrics: PeerMetrics) {
@@ -247,6 +260,40 @@ impl PeerSelectionService {
                 "Recorded successful transfer for peer {}: {} bytes in {}ms",
                 peer_id, bytes, duration_ms
             );
+
+            // Create blockchain reputation event for successful transfer
+            let transfer_data = serde_json::json!({
+                "bytes": bytes,
+                "duration_ms": duration_ms,
+                "speed_kbps": if duration_ms > 0 { (bytes * 8) / duration_ms } else { 0 },
+                "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            });
+
+            // Spawn async task for reputation event creation
+            if let Some(ref rep_system) = self.reputation_system {
+                let peer_id = peer_id.to_string();
+                let rep_system = rep_system.clone();
+                tokio::spawn(async move {
+                    let event = ReputationEvent::new(
+                        format!("event_{}_{}", peer_id, SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()),
+                        peer_id.clone(),
+                        "local_node".to_string(),
+                        EventType::FileTransferSuccess,
+                        transfer_data,
+                        1.0,
+                    );
+
+                    let mut rep_system = rep_system.lock().await;
+                    if let Err(e) = rep_system.add_reputation_event(event).await {
+                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                    } else {
+                        debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
+                    }
+                });
+            }
         }
     }
 
@@ -255,7 +302,121 @@ impl PeerSelectionService {
         if let Some(metrics) = self.metrics.get_mut(peer_id) {
             metrics.record_failed_transfer(error);
             warn!("Recorded failed transfer for peer {}: {}", peer_id, error);
+
+            // Create blockchain reputation event for failed transfer
+            let failure_data = serde_json::json!({
+                "error": error,
+                "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            });
+
+            // Spawn async task for reputation event creation
+            if let Some(ref rep_system) = self.reputation_system {
+                let peer_id = peer_id.to_string();
+                let rep_system = rep_system.clone();
+                tokio::spawn(async move {
+                    let event = ReputationEvent::new(
+                        format!("event_{}_{}", peer_id, SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()),
+                        peer_id.clone(),
+                        "local_node".to_string(),
+                        EventType::FileTransferFailure,
+                        failure_data,
+                        1.0,
+                    );
+
+                    let mut rep_system = rep_system.lock().await;
+                    if let Err(e) = rep_system.add_reputation_event(event).await {
+                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                    } else {
+                        debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
+                    }
+                });
+            }
         }
+    }
+
+    /// Record a successful connection to a peer
+    pub fn record_connection_established(&mut self, peer_id: &str, address: &str) {
+        // Update or create peer metrics
+        if let Some(metrics) = self.metrics.get_mut(peer_id) {
+            metrics.last_seen = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        } else {
+            let new_metrics = PeerMetrics::new(peer_id.to_string(), address.to_string());
+            self.metrics.insert(peer_id.to_string(), new_metrics);
+        }
+
+        // Create blockchain reputation event for connection
+        let connection_data = serde_json::json!({
+            "address": address,
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        });
+
+        // Spawn async task for reputation event creation
+        if let Some(ref rep_system) = self.reputation_system {
+            let peer_id = peer_id.to_string();
+            let rep_system = rep_system.clone();
+            tokio::spawn(async move {
+                let event = ReputationEvent::new(
+                    format!("event_{}_{}", peer_id, SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()),
+                    peer_id.clone(),
+                    "local_node".to_string(),
+                    EventType::ConnectionEstablished,
+                    connection_data,
+                    1.0,
+                );
+
+                let mut rep_system = rep_system.lock().await;
+                if let Err(e) = rep_system.add_reputation_event(event).await {
+                    warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                } else {
+                    debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
+                }
+            });
+        }
+
+        info!("Recorded connection established for peer {} at {}", peer_id, address);
+    }
+
+    /// Record a lost connection to a peer
+    pub fn record_connection_lost(&mut self, peer_id: &str, reason: &str) {
+        // Create blockchain reputation event for connection loss
+        let connection_data = serde_json::json!({
+            "reason": reason,
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        });
+
+        // Spawn async task for reputation event creation
+        if let Some(ref rep_system) = self.reputation_system {
+            let peer_id = peer_id.to_string();
+            let rep_system = rep_system.clone();
+            tokio::spawn(async move {
+                let event = ReputationEvent::new(
+                    format!("event_{}_{}", peer_id, SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()),
+                    peer_id.clone(),
+                    "local_node".to_string(),
+                    EventType::ConnectionLost,
+                    connection_data,
+                    1.0,
+                );
+
+                let mut rep_system = rep_system.lock().await;
+                if let Err(e) = rep_system.add_reputation_event(event).await {
+                    warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                } else {
+                    debug!("Created reputation event for peer {}: ConnectionLost", peer_id);
+                }
+            });
+        }
+
+        warn!("Recorded connection lost for peer {}: {}", peer_id, reason);
     }
 
     /// Update latency for a peer
