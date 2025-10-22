@@ -23,8 +23,6 @@ mod proxy_latency;
 mod stream_auth;
 mod webrtc_service;
 mod reputation;
-use std::sync::Mutex as StdMutex;
-
 use crate::commands::auth::{
     cleanup_expired_proxy_auth_tokens, generate_proxy_auth_token, revoke_proxy_auth_token,
     validate_proxy_auth_token,
@@ -4642,7 +4640,6 @@ async fn store_file_data(
     }
 }
 
-<<<<<<< HEAD
 // ============================================================================
 // REPUTATION VERIFICATION COMMANDS
 // ============================================================================
@@ -4723,7 +4720,8 @@ async fn get_cached_reputation_scores(
     // For now, return empty map as placeholder
     tracing::info!("Getting cached reputation scores");
     Ok(std::collections::HashMap::new()) // Placeholder
-=======
+}
+
 // --- New: Proof-of-Storage watcher commands & task ----------------------------------
 //
 // Summary of additions:
@@ -4959,5 +4957,4 @@ async fn get_multiaddresses(state: State<'_, AppState>) -> Result<Vec<String>, S
     } else {
         Ok(Vec::new())
     }
->>>>>>> upstream/main
 }

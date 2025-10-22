@@ -302,6 +302,8 @@ impl ReputationDhtService {
             parent_hash: None,
             cids: None, // Not needed for reputation events
             is_root: true,
+            download_path: None,
+            encrypted_key_bundle: None,
         };
 
         dht_service.publish_file(metadata).await
@@ -344,6 +346,8 @@ impl ReputationDhtService {
             parent_hash: None,
             cids: None, // Not needed for merkle roots
             is_root: true,
+            download_path: None,
+            encrypted_key_bundle: None,
         };
 
         dht_service.publish_file(metadata).await
