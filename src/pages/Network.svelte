@@ -152,6 +152,18 @@
   let copiedPeerId = false
   let copiedBootstrap = false
   let copiedListenAddr: string | null = null
+  let publicMultiaddrs: string[] = []
+
+  // Fetch public multiaddresses (non-loopback)
+  async function fetchPublicMultiaddrs() {
+    try {
+      const addrs = await invoke<string[]>('get_multiaddresses')
+      publicMultiaddrs = addrs
+    } catch (e) {
+      console.error('Failed to get multiaddresses:', e)
+      publicMultiaddrs = []
+    }
+  }
 
   function formatSize(bytes: number | undefined): string {
     if (bytes === undefined || bytes === null || isNaN(bytes)) {
@@ -371,6 +383,8 @@
             autonatServers: $settings.autonatServers,
             enableAutorelay: $settings.enableAutorelay,
             preferredRelays: $settings.preferredRelays || [],
+            enableRelayServer: $settings.enableRelayServer,
+            relayServerAlias: $settings.relayServerAlias || '',
             chunkSizeKb: $settings.chunkSize,
             cacheSizeMb: $settings.cacheSize,
           })
@@ -549,6 +563,8 @@
         if (health) {
           dhtHealth = health
           peerCount = health.peerCount
+          // Fetch public multiaddresses
+          await fetchPublicMultiaddrs()
           dhtPeerCount = peerCount
           lastNatState = health.reachability
           lastNatConfidence = health.reachabilityConfidence
@@ -691,15 +707,37 @@
         return;
       }
 
+      // Check if peer is already connected
+      const isAlreadyConnected = $peers.some(peer =>
+        peer.id === peerAddress ||
+        peer.address === peerAddress ||
+        peer.address.includes(peerAddress) ||
+        peerAddress.includes(peer.id)
+      );
+
+      if (isAlreadyConnected) {
+        showToast('Peer is already connected', 'info');
+        newPeerAddress = '';
+        return;
+      }
+
       try {
         showToast('Connecting to peer via DHT...', 'info');
+        const currentPeerCount = $peers.length;
         await invoke('connect_to_peer', { peerAddress });
-        showToast('Successfully connected to peer!', 'success');
 
-        // Clear input on successful connection
+        // Clear input
         newPeerAddress = '';
 
-        // Peer list will auto-update via polling within ~5 seconds
+        // Wait a moment and check if the peer was actually added
+        setTimeout(async () => {
+          await refreshConnectedPeers();
+          if ($peers.length > currentPeerCount) {
+            showToast('Connection Success!', 'success');
+          } else {
+            showToast('Connection failed. Peer may be unreachable or address invalid.', 'error');
+          }
+        }, 2000);
       } catch (error) {
         console.error('Failed to connect to peer:', error);
         showToast('Failed to connect to peer: ' + error, 'error');
@@ -1073,6 +1111,13 @@
 
       // Also passively sync DHT state if it's already running
       await syncDhtStatusOnMount()
+
+      // Auto-start DHT if enabled in settings
+      if (isTauri && $settings.autoStartDht && dhtStatus === 'disconnected') {
+        console.log('Auto-starting DHT network...')
+        dhtEvents = [...dhtEvents, '🚀 Auto-starting network...']
+        await startDht()
+      }
 
       if (isTauri) {
         if (!peerDiscoveryUnsub) {
@@ -1493,13 +1538,12 @@
             <p class="text-xs font-mono break-all">{dhtBootstrapNode}</p>
           </div>
 
-          {#if dhtHealth?.listenAddrs && dhtHealth.listenAddrs.length > 0}
+          {#if publicMultiaddrs && publicMultiaddrs.length > 0}
             <div class="pt-2 space-y-2">
               <p class="text-sm text-muted-foreground">{$t('network.dht.listenAddresses')}</p>
-              {#each dhtHealth.listenAddrs as addr}
-                {@const fullAddr = dhtPeerId ? `${addr}/p2p/${dhtPeerId}` : addr}
+              {#each publicMultiaddrs as fullAddr}
                 <div class="bg-muted/40 rounded-lg px-3 py-2">
-                  <div class="flex items-start justify-between gap-2">
+                  <div class="flex items-center justify-between gap-2">
                     <p class="text-xs font-mono break-all flex-1">{fullAddr}</p>
                     <Button
                       variant="outline"
@@ -1871,16 +1915,18 @@
                         {#each peer.addresses as addr}
                           <div class="flex items-center justify-between gap-2">
                             <span class="text-xs font-mono break-all">{addr}</span>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              on:click={() => {
-                                newPeerAddress = addr
-                                showToast($t('network.peerDiscovery.peerAddedToInput'), 'success')
-                              }}
-                            >
-                              {$t('network.peerDiscovery.add')}
-                            </Button>
+                            {#if addr.includes('/p2p/')}
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                on:click={() => {
+                                  newPeerAddress = addr
+                                  showToast($t('network.peerDiscovery.peerAddedToInput'), 'success')
+                                }}
+                              >
+                                {$t('network.peerDiscovery.add')}
+                              </Button>
+                            {/if}
                           </div>
                         {/each}
                       </div>

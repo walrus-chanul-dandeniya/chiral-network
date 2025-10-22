@@ -29,6 +29,8 @@ export interface DhtConfig {
   cacheSizeMb?: number;
   enableAutorelay?: boolean;
   preferredRelays?: string[];
+  enableRelayServer?: boolean;
+  relayServerAlias?: string; // Public alias for relay server (appears in logs and bootstrap)
 }
 
 export interface FileMetadata {
@@ -38,12 +40,15 @@ export interface FileMetadata {
   fileData?: Uint8Array | number[];
   seeders: string[];
   createdAt: number;
+  merkleRoot?: string;
   mimeType?: string;
   isEncrypted: boolean;
   encryptionMethod?: string;
   keyFingerprint?: string;
   version?: number;
   manifest?: string;
+  isRoot?: boolean;
+  cids?: string[];
 }
 
 export interface FileManifestForJs {
@@ -59,7 +64,7 @@ export const encryptionService = {
 
   async decryptFile(
     manifest: FileManifestForJs,
-    outputPath: string
+    outputPath: string,
   ): Promise<void> {
     await invoke("decrypt_and_reassemble_file", {
       manifestJs: manifest,
@@ -92,6 +97,17 @@ export interface DhtHealth {
   lastReservationFailure: number | null;
   reservationRenewals: number;
   reservationEvictions: number;
+  // Extended relay error tracking
+  relayConnectionAttempts: number;
+  relayConnectionSuccesses: number;
+  relayConnectionFailures: number;
+  lastRelayError: string | null;
+  lastRelayErrorType: string | null;
+  lastRelayErrorAt: number | null;
+  activeRelayCount: number;
+  totalRelaysInPool: number;
+  relayHealthScore: number; // Average health score of all relays
+  lastReservationRenewal: number | null;
   // DCUtR hole-punching metrics
   dcutrEnabled: boolean;
   dcutrHolePunchAttempts: number;
@@ -163,6 +179,15 @@ export class DhtService {
       if (config?.preferredRelays && config.preferredRelays.length > 0) {
         payload.preferredRelays = config.preferredRelays;
       }
+      if (typeof config?.enableRelayServer === "boolean") {
+        payload.enableRelayServer = config.enableRelayServer;
+      }
+      if (
+        typeof config?.relayServerAlias === "string" &&
+        config.relayServerAlias.trim().length > 0
+      ) {
+        payload.relayServerAlias = config.relayServerAlias.trim();
+      }
 
       const peerId = await invoke<string>("start_dht_node", payload);
       this.peerId = peerId;
@@ -188,63 +213,95 @@ export class DhtService {
     }
   }
 
+  async publishFileToNetwork(filePath: string): Promise<FileMetadata> {
+    try {
+      // Start listening for the published_file event
+      const metadataPromise = new Promise<FileMetadata>((resolve, reject) => {
+        const unlistenPromise = listen<FileMetadata>(
+          "published_file",
+          (event) => {
+            const metadata = event.payload;
+            if (!metadata.merkleRoot && metadata.fileHash) {
+              metadata.merkleRoot = metadata.fileHash;
+            }
+            if (!metadata.fileHash && metadata.merkleRoot) {
+              metadata.fileHash = metadata.merkleRoot;
+            }
+            resolve(metadata);
+            // Unsubscribe once we got the event
+            unlistenPromise.then((unlistenFn) => unlistenFn());
+          },
+        );
+      });
 
+      // Trigger the backend upload
+      await invoke("upload_file_to_network", { filePath });
+
+      // Wait until the event arrives
+      return await metadataPromise;
+    } catch (error) {
+      console.error("Failed to publish file:", error);
+      throw error;
+    }
+  }
 
   async downloadFile(fileMetadata: FileMetadata): Promise<FileMetadata> {
     try {
       console.log("Initiating download for file:", fileMetadata.fileHash);
       // Start listening for the published_file event
+      const stored = localStorage.getItem("chiralSettings");
+      let storagePath = "."; // Default fallback
+
+      if (stored) {
+        try {
+          const loadedSettings: AppSettings = JSON.parse(stored);
+          storagePath = loadedSettings.storagePath;
+        } catch (e) {
+          console.error("Failed to load settings:", e);
+        }
+      }
+      // Construct full file path
+      let resolvedStoragePath = storagePath;
+
+      if (storagePath.startsWith("~")) {
+        const home = await homeDir();
+        resolvedStoragePath = storagePath.replace("~", home);
+      }
+      resolvedStoragePath += "/" + fileMetadata.fileName;
+
+      // Trigger the backend download - ensure cids and isRoot are provided for Bitswap handling
+      fileMetadata.merkleRoot = fileMetadata.fileHash;
+      // Preserve existing fileData if present, otherwise provide an empty placeholder
+      fileMetadata.fileData = fileMetadata.fileData ?? [];
+      // Ensure cids exists; Bitswap expects a root CID list. Fallback to merkleRoot when absent.
+      if (!fileMetadata.cids || fileMetadata.cids.length === 0) {
+        fileMetadata.cids = [fileMetadata.merkleRoot];
+      }
+      // Determine isRoot: true when explicitly set, or when the merkleRoot equals the first CID
+      // or when there's only a single CID (fallback root).
+      fileMetadata.isRoot =
+        typeof fileMetadata.isRoot === "boolean"
+          ? fileMetadata.isRoot
+          : fileMetadata.cids[0] === fileMetadata.merkleRoot ||
+            fileMetadata.cids.length === 1;
+      console.log("Prepared file metadata for Bitswap download:", fileMetadata);
+      await invoke("download_blocks_from_network", {
+        fileMetadata,
+        downloadPath: resolvedStoragePath,
+      });
       const metadataPromise = new Promise<FileMetadata>((resolve) => {
         const unlistenPromise = listen<FileMetadata>(
           "file_content",
           async (event) => {
             console.log("Received file content event:", event.payload);
-            const stored = localStorage.getItem("chiralSettings");
-            let storagePath = "."; // Default fallback
-
-            if (stored) {
-              try {
-                const loadedSettings: AppSettings = JSON.parse(stored);
-                storagePath = loadedSettings.storagePath;
-              } catch (e) {
-                console.error("Failed to load settings:", e);
-              }
-            }
-            if (event.payload.fileData) {
-              //
-              // Construct full file path
-              let resolvedStoragePath = storagePath;
-
-              if (storagePath.startsWith("~")) {
-                const home = await homeDir();
-                resolvedStoragePath = storagePath.replace("~", home);
-              }
-              resolvedStoragePath += "/" + event.payload.fileName;
-              // Convert to Uint8Array if needed
-              const fileData =
-                event.payload.fileData instanceof Uint8Array
-                  ? event.payload.fileData
-                  : new Uint8Array(event.payload.fileData);
-
-              // Write file to disk
-              console.log(`File saved to: ${resolvedStoragePath}`);
-
-              await invoke("write_file", {
-                path: resolvedStoragePath,
-                contents: Array.from(fileData),
-              });
-              console.log(`File saved to: ${resolvedStoragePath}`);
-            }
+            console.log(`File saved to: ${resolvedStoragePath}`);
 
             resolve(event.payload);
             // Unsubscribe once we got the event
             unlistenPromise.then((unlistenFn) => unlistenFn());
-          }
+          },
         );
       });
-
-      // Trigger the backend upload
-      await invoke("download_blocks_from_network", { fileMetadata });
 
       // Wait until the event arrives
       return await metadataPromise;
@@ -268,12 +325,26 @@ export class DhtService {
     }
   }
 
+  async searchFileByCid(cid: string): Promise<void> {
+    if (!this.peerId) {
+      throw new Error("DHT not started");
+    }
+
+    try {
+      await invoke("search_file_by_cid", { cidStr: cid });
+      console.log("Searching for file by CID:", cid);
+    } catch (error) {
+      console.error("Failed to search file by CID:", error);
+      throw error;
+    }
+  }
+
   async connectPeer(peerAddress: string): Promise<void> {
     // Note: We check peerId to ensure DHT was started, but the actual error
     // might be from the backend saying networking isn't implemented
     if (!this.peerId) {
       console.error(
-        "DHT service peerId not set, service may not be initialized"
+        "DHT service peerId not set, service may not be initialized",
       );
       throw new Error("DHT service not initialized properly");
     }
@@ -323,6 +394,18 @@ export class DhtService {
     return `/ip4/127.0.0.1/tcp/${this.port}/p2p/${this.peerId}`;
   }
 
+  async getSeedersForFile(fileHash: string): Promise<string[]> {
+    try {
+      const seeders = await invoke<string[]>("get_file_seeders", {
+        fileHash,
+      });
+      return Array.isArray(seeders) ? seeders : [];
+    } catch (error) {
+      console.error("Failed to fetch seeders:", error);
+      return [];
+    }
+  }
+
   async getPeerCount(): Promise<number> {
     try {
       const count = await invoke<number>("get_dht_peer_count");
@@ -345,7 +428,7 @@ export class DhtService {
 
   async searchFileMetadata(
     fileHash: string,
-    timeoutMs = 10_000
+    timeoutMs = 10_000,
   ): Promise<FileMetadata | null> {
     const trimmed = fileHash.trim();
     if (!trimmed) {
@@ -385,13 +468,13 @@ export class DhtService {
                         ? result.seeders
                         : [],
                     }
-                  : null
+                  : null,
               );
               // Unsubscribe once we got the event
               unlistenPromise.then((unlistenFn) => unlistenFn());
-            }
+            },
           );
-        }
+        },
       );
 
       // Trigger the backend search
@@ -400,8 +483,24 @@ export class DhtService {
         timeoutMs,
       });
 
-      // Wait until the event arrives
-      return await metadataPromise;
+      const metadata = await metadataPromise;
+      if (metadata) {
+        if (!metadata.merkleRoot && metadata.fileHash) {
+          metadata.merkleRoot = metadata.fileHash;
+        }
+        if (!metadata.fileHash && metadata.merkleRoot) {
+          metadata.fileHash = metadata.merkleRoot;
+        }
+        const hashForSeeders =
+          metadata.merkleRoot || metadata.fileHash || trimmed;
+        if (hashForSeeders) {
+          const seeders = await this.getSeedersForFile(hashForSeeders);
+          if (seeders.length > 0) {
+            metadata.seeders = seeders;
+          }
+        }
+      }
+      return metadata;
     } catch (error) {
       console.error("Failed to search file metadata:", error);
       throw error;

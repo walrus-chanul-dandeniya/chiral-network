@@ -13,7 +13,11 @@
     Bell,
     RefreshCw,
     Database,
-    Languages
+    Languages,
+    Activity,
+    CheckCircle,
+    AlertTriangle,
+    Copy
   } from "lucide-svelte";
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -21,7 +25,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { userLocation } from "$lib/stores";
   import { GEO_REGIONS, UNKNOWN_REGION_ID } from '$lib/geo';
-  import { changeLocale, loadLocale } from "../i18n/i18n";
+  import { changeLocale, loadLocale, saveLocale } from "../i18n/i18n";
   import { t } from "svelte-i18n";
   import { get } from "svelte/store";
   import { showToast } from "$lib/toast";
@@ -63,6 +67,8 @@
     autonatServers: [],
     enableAutorelay: true,
     preferredRelays: [],
+    enableRelayServer: false,
+    autoStartDht: false,
     anonymousMode: false,
     shareAnalytics: true,
 
@@ -82,8 +88,8 @@
     enableBandwidthScheduling: false,
     bandwidthSchedules: [],
   };
-  let localSettings: AppSettings = get(settings); 
-  let savedSettings: AppSettings = get(settings);
+  let localSettings: AppSettings = JSON.parse(JSON.stringify(get(settings)));
+  let savedSettings: AppSettings = JSON.parse(JSON.stringify(localSettings));
   let hasChanges = false;
   let fileInputEl: HTMLInputElement | null = null;
   let selectedLanguage: string | undefined = undefined;
@@ -94,9 +100,15 @@
     type: "success" | "error";
   } | null = null;
 
+  // Diagnostics state
+  type DiagStatus = "pass" | "fail" | "warn";
+  type DiagItem = { id: string; label: string; status: DiagStatus; details?: string };
+  let diagnosticsRunning = false;
+  let diagnostics: DiagItem[] = [];
+  let diagnosticsReport = "";
+
   // NAT & privacy configuration text bindings
   let autonatServersText = '';
-  let preferredRelaysText = '';
   let trustedProxyText = '';
 
   const locationOptions = GEO_REGIONS
@@ -110,11 +122,11 @@
     { value: "es", label: $t("language.spanish") },
     { value: "zh", label: $t("language.chinese") },
     { value: "ko", label: $t("language.korean") },
+    { value: "ru", label: $t("language.russian") },
   ];
 
   // Initialize configuration text from arrays
   $: autonatServersText = localSettings.autonatServers?.join('\n') || '';
-  $: preferredRelaysText = localSettings.preferredRelays?.join('\n') || '';
   $: trustedProxyText = localSettings.trustedProxyRelays?.join('\n') || '';
 
   const privacyModeOptions = [
@@ -132,6 +144,72 @@
     },
   ];
 
+  type PrivacySnapshot = Pick<
+    AppSettings,
+    "ipPrivacyMode" | "enableProxy" | "proxyAddress" | "disableDirectNatTraversal" | "enableAutorelay"
+  >;
+
+  let anonymousModeRestore: PrivacySnapshot | null = null;
+
+  function capturePrivacySnapshot(): void {
+    if (anonymousModeRestore !== null) {
+      return;
+    }
+    anonymousModeRestore = {
+      ipPrivacyMode: localSettings.ipPrivacyMode,
+      enableProxy: localSettings.enableProxy,
+      proxyAddress: localSettings.proxyAddress,
+      disableDirectNatTraversal: localSettings.disableDirectNatTraversal,
+      enableAutorelay: localSettings.enableAutorelay,
+    };
+  }
+
+  function applyAnonymousDefaults(): void {
+    capturePrivacySnapshot();
+
+    const needsUpdate =
+      localSettings.ipPrivacyMode !== "strict" ||
+      !localSettings.enableProxy ||
+      !localSettings.disableDirectNatTraversal ||
+      !localSettings.enableAutorelay;
+
+    if (!needsUpdate) {
+      return;
+    }
+
+    localSettings = {
+      ...localSettings,
+      ipPrivacyMode: "strict",
+      enableProxy: true,
+      enableAutorelay: true,
+      disableDirectNatTraversal: true,
+    };
+  }
+
+  function restorePrivacySnapshot(): void {
+    if (!anonymousModeRestore) {
+      return;
+    }
+
+    const snapshot = anonymousModeRestore;
+    anonymousModeRestore = null;
+
+    localSettings = {
+      ...localSettings,
+      ipPrivacyMode: snapshot.ipPrivacyMode,
+      enableProxy: snapshot.enableProxy,
+      proxyAddress: snapshot.proxyAddress,
+      disableDirectNatTraversal: snapshot.disableDirectNatTraversal,
+      enableAutorelay: snapshot.enableAutorelay,
+    };
+  }
+
+  $: if (localSettings.anonymousMode) {
+    applyAnonymousDefaults();
+  } else {
+    restorePrivacySnapshot();
+  }
+
   $: privacyStatus = (() => {
     switch (localSettings.ipPrivacyMode) {
       case "prefer":
@@ -147,7 +225,7 @@
   $: hasChanges = JSON.stringify(localSettings) !== JSON.stringify(savedSettings);
 
   async function saveSettings() {
-    if (!isValid || maxStorageError) {
+    if (!isValid || maxStorageError || storagePathError) {
       return;
     }
 
@@ -236,6 +314,7 @@
       chunkSizeKb: localSettings.chunkSize,
       cacheSizeMb: localSettings.cacheSize,
       enableAutorelay: localSettings.ipPrivacyMode !== "off" ? true : localSettings.enableAutorelay,
+      enableRelayServer: localSettings.enableRelayServer,
     };
 
     if (localSettings.autonatServers?.length) {
@@ -254,17 +333,17 @@
   }
 
   $: {
-    // Expand Storage section if it has any errors
-    const hasStorageError = !!maxStorageError || !!errors.maxStorageSize || !!errors.cleanupThreshold;
-    storageSectionOpen = hasStorageError;
+    // Open Storage section if it has any errors (but don't close it if already open)
+    const hasStorageError = !!maxStorageError || !!storagePathError || !!errors.maxStorageSize || !!errors.cleanupThreshold;
+    if (hasStorageError) storageSectionOpen = true;
 
-    // Expand Network section if it has any errors
+    // Open Network section if it has any errors (but don't close it if already open)
     const hasNetworkError = !!errors.maxConnections || !!errors.port || !!errors.uploadBandwidth || !!errors.downloadBandwidth;
-    networkSectionOpen = hasNetworkError;
+    if (hasNetworkError) networkSectionOpen = true;
 
-    // Expand Advanced section if it has any errors
+    // Open Advanced section if it has any errors (but don't close it if already open)
     const hasAdvancedError = !!errors.chunkSize || !!errors.cacheSize;
-    advancedSectionOpen = hasAdvancedError;
+    if (hasAdvancedError) advancedSectionOpen = true;
   }
 
   async function handleConfirmReset() {
@@ -294,7 +373,8 @@
       });
 
       if (typeof result === "string") {
-        localSettings.storagePath = result.replace(home, "~");
+        // Reassign the entire object to trigger reactivity
+        localSettings = { ...localSettings, storagePath: result };
       }
     } catch {
       // Fallback for browser environment
@@ -302,7 +382,8 @@
         // Use File System Access API (Chrome/Edge)
         try {
           const directoryHandle = await (window as any).showDirectoryPicker();
-          localSettings.storagePath = directoryHandle.name;
+          // Reassign the entire object to trigger reactivity
+          localSettings = { ...localSettings, storagePath: directoryHandle.name };
         } catch (err: any) {
           if (err.name !== "AbortError") {
             console.error("Directory picker error:", err);
@@ -315,7 +396,8 @@
           localSettings.storagePath
         );
         if (newPath) {
-          localSettings.storagePath = newPath;
+          // Reassign the entire object to trigger reactivity
+          localSettings = { ...localSettings, storagePath: newPath };
         }
       }
     }
@@ -391,13 +473,6 @@
       .filter(s => s.length > 0);
   }
 
-  function updatePreferredRelays() {
-    localSettings.preferredRelays = preferredRelaysText
-      .split('\n')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-  }
-
   function updateTrustedProxyRelays() {
     localSettings.trustedProxyRelays = trustedProxyText
       .split('\n')
@@ -405,17 +480,105 @@
       .filter((line) => line.length > 0);
   }
 
+  async function runDiagnostics() {
+    diagnosticsRunning = true;
+    diagnostics = [];
+    diagnosticsReport = "";
+
+    const add = (item: DiagItem) => {
+      diagnostics = [...diagnostics, item];
+    };
+
+    const tr = get(t) as (key: string, params?: any) => string;
+
+    // 1) Environment (Web vs Tauri)
+    const isTauri = typeof window !== "undefined" && "__TAURI__" in window;
+    try {
+      if (isTauri) {
+        const ver = await getVersion();
+        add({ id: "env", label: tr("settings.diagnostics.environment"), status: "pass", details: `Tauri ${ver}` });
+      } else {
+        add({ id: "env", label: tr("settings.diagnostics.environment"), status: "warn", details: "Web build: some checks skipped" });
+      }
+    } catch (e:any) {
+      add({ id: "env", label: tr("settings.diagnostics.environment"), status: "fail", details: String(e) });
+    }
+
+    // 2) i18n storage read/write
+    try {
+      const before = await loadLocale();
+      await saveLocale(before || "en");
+      const after = await loadLocale();
+      const ok = (before || "en") === (after || "en");
+      add({ id: "i18n", label: tr("settings.diagnostics.i18nStorage"), status: ok ? "pass" : "warn", details: `value=${after ?? "null"}` });
+    } catch (e:any) {
+      add({ id: "i18n", label: tr("settings.diagnostics.i18nStorage"), status: "fail", details: String(e) });
+    }
+
+    // 3) Bootstrap nodes availability (DHT)
+    try {
+      // Only in Tauri builds
+      if (isTauri) {
+        const nodes = await invoke<string[]>("get_bootstrap_nodes_command");
+        const count = Array.isArray(nodes) ? nodes.length : 0;
+        add({ id: "dht", label: tr("settings.diagnostics.bootstrapNodes"), status: count > 0 ? "pass" : "fail", details: `count=${count}` });
+      } else {
+        add({ id: "dht", label: tr("settings.diagnostics.bootstrapNodes"), status: "warn", details: "Skipped in web build" });
+      }
+    } catch (e:any) {
+      add({ id: "dht", label: tr("settings.diagnostics.bootstrapNodes"), status: "fail", details: String(e) });
+    }
+
+    // 4) Privacy routing configuration sanity
+    try {
+      const ipMode = localSettings.ipPrivacyMode;
+      const trusted = localSettings.trustedProxyRelays?.length ?? 0;
+      if (ipMode !== "off" && trusted === 0) {
+        add({ id: "privacy", label: tr("settings.diagnostics.privacyConfig"), status: "warn", details: tr("settings.diagnostics.privacyNeedsTrusted") });
+      } else {
+        add({ id: "privacy", label: tr("settings.diagnostics.privacyConfig"), status: "pass", details: `mode=${ipMode}, trusted=${trusted}` });
+      }
+    } catch (e:any) {
+      add({ id: "privacy", label: tr("settings.diagnostics.privacyConfig"), status: "fail", details: String(e) });
+    }
+
+    // Build report text
+    diagnosticsReport = diagnostics
+      .map((d) => `${d.status.toUpperCase()} - ${d.label}: ${d.details ?? ""}`)
+      .join("\n");
+    diagnosticsRunning = false;
+  }
+
+  async function copyDiagnostics() {
+    try {
+      await navigator.clipboard.writeText(diagnosticsReport);
+      showToast(tr("settings.diagnostics.copied"));
+    } catch (e) {
+      showToast(tr("settings.diagnostics.copyFailed"), "error");
+    }
+  }
+
     onMount(async () => {
+    // Get platform-specific default storage path from Tauri
+    try {
+      const platformDefaultPath = await invoke<string>("get_default_storage_path");
+      defaultSettings.storagePath = platformDefaultPath;
+    } catch (e) {
+      console.error("Failed to get default storage path:", e);
+      // Fallback to the hardcoded default if the command fails
+      defaultSettings.storagePath = "~/ChiralNetwork/Storage";
+    }
+
     // Load settings from local storage
     const stored = localStorage.getItem("chiralSettings");
     if (stored) {
   try {
     const loadedSettings: AppSettings = JSON.parse(stored);
     // Set the store, which ensures it is available globally
-    settings.set({ ...defaultSettings, ...loadedSettings }); 
+    settings.set({ ...defaultSettings, ...loadedSettings });
     // Update local state from the store after loading
-    localSettings = get(settings); 
-    savedSettings = get(settings); 
+    localSettings = JSON.parse(JSON.stringify(get(settings)));
+    savedSettings = JSON.parse(JSON.stringify(localSettings)); 
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -480,10 +643,45 @@ selectedLanguage = initial; // Synchronize dropdown display value
 
   let freeSpaceGB: number | null = null;
   let maxStorageError: string | null = null;
+  let storagePathError: string | null = null;
 
   onMount(async () => {
     freeSpaceGB = await invoke('get_available_storage');
   });
+
+  // Check if storage path exists
+  async function checkStoragePathExists(path: string) {
+    if (!path || path.trim() === '') {
+      storagePathError = null;
+      return;
+    }
+
+    try {
+      // Expand ~ to actual home directory for checking
+      let pathToCheck = path;
+      if (path.startsWith("~/") || path.startsWith("~\\")) {
+        const home = await homeDir();
+        pathToCheck = path.replace(/^~/, home);
+      } else if (path === "~") {
+        pathToCheck = await homeDir();
+      }
+
+      const exists = await invoke<boolean>('check_directory_exists', { path: pathToCheck });
+      if (!exists) {
+        storagePathError = 'Directory does not exist';
+      } else {
+        storagePathError = null;
+      }
+    } catch (error) {
+      console.error('Failed to check directory:', error);
+      storagePathError = null;
+    }
+  }
+
+  // Check storage path whenever it changes
+  $: if (localSettings.storagePath) {
+    checkStoragePathExists(localSettings.storagePath);
+  }
 
   $: {
     if (freeSpaceGB !== null && localSettings.maxStorageSize > freeSpaceGB) {
@@ -596,7 +794,7 @@ function sectionMatches(section: string, query: string) {
               id="storage-path"
               bind:value={localSettings.storagePath}
               placeholder="~/ChiralNetwork/Storage"
-              class="flex-1"
+              class={`flex-1 ${storagePathError ? 'border-red-500 focus:border-red-500 ring-red-500' : ''}`}
             />
             <Button
               variant="outline"
@@ -606,6 +804,10 @@ function sectionMatches(section: string, query: string) {
               <FolderOpen class="h-4 w-4" />
             </Button>
           </div>
+          {#if storagePathError}
+            <p class="mt-1 text-sm text-red-500">{storagePathError}</p>
+          {/if}
+          
         </div>
 
         <div class="grid grid-cols-2 gap-4">
@@ -785,26 +987,55 @@ function sectionMatches(section: string, query: string) {
           <div class="flex items-center gap-2">
             <input
               type="checkbox"
-              id="enable-autorelay"
-              bind:checked={localSettings.enableAutorelay}
+              id="auto-start-dht"
+              bind:checked={localSettings.autoStartDht}
             />
-            <Label for="enable-autorelay" class="cursor-pointer">
-              {$t("settings.autorelay.enable")}
+            <Label for="auto-start-dht" class="cursor-pointer">
+              Auto-start Network on App Launch
             </Label>
           </div>
 
-          {#if localSettings.enableAutorelay}
-            <div class="space-y-2 ml-6">
-              <Label for="preferred-relays">{$t("settings.autorelay.relays")}</Label>
-              <textarea
-                id="preferred-relays"
-                bind:value={localSettings.preferredRelays}
-                placeholder="/ip4/147.75.80.110/tcp/4001/p2p/QmNnooDu..."
-                rows="3"
-                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-              ></textarea>
-              <p class="text-xs text-muted-foreground">
-                {$t("settings.autorelay.description")}
+          {#if localSettings.autoStartDht}
+            <div class="ml-6 p-3 bg-blue-50 rounded-md border border-blue-200">
+              <p class="text-xs text-blue-900">
+                The DHT network will automatically start when you open the application, so you don't have to manually start it each time.
+              </p>
+            </div>
+          {/if}
+
+          <div class="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="enable-relay-server"
+              bind:checked={localSettings.enableRelayServer}
+            />
+            <Label for="enable-relay-server" class="cursor-pointer">
+              Enable Relay Server <span class="text-xs text-green-600 font-semibold">(Recommended - Enabled by Default)</span>
+            </Label>
+          </div>
+
+          {#if localSettings.enableRelayServer}
+            <div class="ml-6 p-4 bg-green-50 rounded-md border border-green-200">
+              <p class="text-sm text-green-900 mb-2">
+                <strong>✅ Relay Server Enabled</strong>
+              </p>
+              <p class="text-xs text-green-700 mb-2">
+                Your node helps peers behind NAT connect. This strengthens the decentralized network without requiring central infrastructure.
+              </p>
+              <ul class="text-xs text-green-600 space-y-1">
+                <li>• Enables cross-network peer connections</li>
+                <li>• Strengthens network decentralization</li>
+                <li>• Minimal resource usage when idle</li>
+                <li>• Only uses bandwidth when actively relaying</li>
+              </ul>
+            </div>
+          {:else}
+            <div class="ml-6 p-4 bg-yellow-50 rounded-md border border-yellow-200">
+              <p class="text-sm text-yellow-900 mb-2">
+                <strong>⚠️ Relay Server Disabled</strong>
+              </p>
+              <p class="text-xs text-yellow-700">
+                Your node cannot help others connect across networks. Enable this to strengthen the network.
               </p>
             </div>
           {/if}
@@ -1135,37 +1366,6 @@ function sectionMatches(section: string, query: string) {
           {/if}
         </div>
 
-        <!-- AutoRelay Configuration -->
-        <div class="space-y-3 border-t pt-3">
-          <div class="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="enable-autorelay"
-              bind:checked={localSettings.enableAutorelay}
-            />
-            <Label for="enable-autorelay" class="cursor-pointer">
-              Enable Circuit Relay v2 (AutoRelay)
-            </Label>
-          </div>
-
-          {#if localSettings.enableAutorelay}
-            <div>
-              <Label for="preferred-relays">Preferred Relay Nodes (optional)</Label>
-              <textarea
-                id="preferred-relays"
-                bind:value={preferredRelaysText}
-                on:blur={updatePreferredRelays}
-                placeholder="/ip4/relay.example.com/tcp/4001/p2p/QmRelayId&#10;One multiaddr per line"
-                rows="3"
-                class="w-full px-3 py-2 border rounded-md text-sm"
-              ></textarea>
-              <p class="text-xs text-muted-foreground mt-1">
-                Leave empty to use bootstrap nodes as relays
-              </p>
-            </div>
-          {/if}
-        </div>
-
         <div class="flex items-center gap-2">
           <input
             type="checkbox"
@@ -1368,6 +1568,56 @@ function sectionMatches(section: string, query: string) {
     </Expandable>
   {/if}
 
+  <!-- Diagnostics -->
+  {#if sectionMatches("diagnostics", search)}
+    <Expandable>
+      <div slot="title" class="flex items-center gap-3">
+        <Activity class="h-6 w-6 text-blue-600" />
+        <h2 class="text-xl font-semibold text-black">{$t("settings.diagnostics.title")}</h2>
+      </div>
+      <div class="space-y-4">
+        <p class="text-sm text-muted-foreground">{$t("settings.diagnostics.description")}</p>
+
+        <div class="flex gap-2 items-center">
+          <Button size="xs" on:click={runDiagnostics} disabled={diagnosticsRunning}>
+            <RefreshCw class="h-4 w-4 mr-2 {diagnosticsRunning ? 'animate-spin' : ''}" />
+            {diagnosticsRunning ? $t("settings.diagnostics.running") : $t("settings.diagnostics.run")}
+          </Button>
+          {#if diagnostics.length > 0}
+            <Button variant="outline" size="xs" on:click={copyDiagnostics}>
+              <Copy class="h-4 w-4 mr-2" />{$t("settings.diagnostics.copyReport")}
+            </Button>
+          {/if}
+        </div>
+
+        {#if diagnostics.length > 0}
+          <div>
+            <h3 class="font-medium mb-2">{$t("settings.diagnostics.resultsTitle")}</h3>
+            <ul class="space-y-2">
+              {#each diagnostics as d}
+                <li class="flex items-start gap-2">
+                  {#if d.status === 'pass'}
+                    <CheckCircle class="h-4 w-4 text-green-600 mt-0.5" />
+                  {:else if d.status === 'warn'}
+                    <AlertTriangle class="h-4 w-4 text-amber-600 mt-0.5" />
+                  {:else}
+                    <AlertTriangle class="h-4 w-4 text-red-600 mt-0.5" />
+                  {/if}
+                  <div>
+                    <div class="text-sm font-medium">{d.label}</div>
+                    {#if d.details}
+                      <div class="text-xs text-muted-foreground">{d.details}</div>
+                    {/if}
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+      </div>
+    </Expandable>
+  {/if}
+
   <!-- Action Buttons -->
   <div class="flex flex-wrap items-center justify-between gap-2">
     <Button variant="destructive" size="xs" on:click={openResetConfirm}>
@@ -1379,7 +1629,7 @@ function sectionMatches(section: string, query: string) {
         variant="outline"
         size="xs"
         disabled={!hasChanges}
-        on:click={() => (localSettings = { ...savedSettings })}
+        on:click={() => (localSettings = JSON.parse(JSON.stringify(savedSettings)))}
         class={`transition-colors duration-200 ${!hasChanges ? "cursor-not-allowed opacity-50" : ""}`}
       >
         {$t("actions.cancel")}
@@ -1388,8 +1638,9 @@ function sectionMatches(section: string, query: string) {
       <Button
         size="xs"
         on:click={saveSettings}
-        disabled={!hasChanges || !!maxStorageError || !isValid}
-        class={`transition-colors duration-200 ${!hasChanges || !!maxStorageError || !isValid ? "cursor-not-allowed opacity-50" : ""}`}
+        disabled={!hasChanges || maxStorageError || storagePathError || !isValid}
+      
+        class={`transition-colors duration-200 ${!hasChanges || maxStorageError || storagePathError || !isValid ? "cursor-not-allowed opacity-50" : ""}`}
       >
         <Save class="h-4 w-4 mr-2" />
         {$t("actions.save")}
