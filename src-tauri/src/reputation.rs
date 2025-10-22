@@ -9,7 +9,8 @@ use rand::rngs::OsRng;
 
 // Ethereum integration imports
 use ethers::prelude::*;
-use ethers::types::{Address, U256, BlockNumber};
+use ethers::types::{U256, BlockNumber};
+use ethers::signers::Signer as EthersSigner;
 
 // ============================================================================
 // REPUTATION TYPES
@@ -386,7 +387,7 @@ impl ReputationContract {
             .map_err(|e| format!("Invalid private key: {}", e))?;
 
         let chain_id = 98765u64; // Chiral Network chain ID
-        let wallet = wallet.with_chain_id(chain_id);
+        let wallet = EthersSigner::with_chain_id(wallet, chain_id);
         let client = SignerMiddleware::new(provider.clone(), wallet);
 
         // For now, we'll create a simple transaction that stores the epoch data
@@ -452,7 +453,7 @@ impl ReputationContract {
             .map_err(|e| format!("Failed to get latest block: {}", e))?;
 
         // Search recent blocks for reputation transactions (last 100 blocks)
-        let start_block = latest_block.saturating_sub(100);
+        let start_block = latest_block.saturating_sub(U64::from(100));
         
         let start = start_block.as_u64();
         let end = latest_block.as_u64();
@@ -615,14 +616,17 @@ impl ReputationContract {
             .map_err(|e| format!("Failed to get latest block: {}", e))?;
 
         // Search recent blocks for reputation epochs (last 1000 blocks)
-        let start_block = latest_block.saturating_sub(1000);
+        let start_block = latest_block.saturating_sub(U64::from(1000));
         
-        for block_num in start_block..=latest_block {
+        let start = start_block.as_u64();
+        let end = latest_block.as_u64();
+        for block_num in start..=end {
             if let Ok(Some(block)) = provider.get_block_with_txs(block_num).await {
                 for tx in block.transactions {
-                    if let Some(data) = tx.input {
+                    if !tx.input.is_empty() {
+                        let data = &tx.input;
                         // Try to deserialize as ReputationEpoch
-                        if let Ok(epoch_data) = std::str::from_utf8(&data) {
+                        if let Ok(epoch_data) = std::str::from_utf8(data) {
                             if let Ok(epoch) = serde_json::from_str::<ReputationEpoch>(epoch_data) {
                                 if epoch.epoch_id >= start_epoch {
                                     // This is a reputation epoch, but we need to get the actual events

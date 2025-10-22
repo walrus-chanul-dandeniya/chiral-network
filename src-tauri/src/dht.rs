@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 pub use multihash_codetable::{Code, MultihashDigest};
 use rs_merkle::{Hasher, MerkleTree};
 use crate::manager::Sha256Hasher;
+use crate::reputation::ReputationSystem;
 use relay::client::Event as RelayClientEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -3228,6 +3229,7 @@ impl DhtService {
             search_counter,
             proxy_mgr,
             peer_selection,
+            reputation_system: None,
             file_metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             received_chunks: received_chunks_clone,
             file_transfer_service,

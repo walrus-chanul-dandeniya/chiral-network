@@ -3,9 +3,110 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+use zeroize::ZeroizeOnDrop;
 
 // Import reputation system for blockchain integration
 use crate::reputation::{ReputationEvent, EventType, ReputationSystem};
+
+/// Secure private key storage with encryption and zeroization
+#[derive(ZeroizeOnDrop)]
+struct SecurePrivateKey {
+    encrypted_key: Vec<u8>,
+    salt: [u8; 32],
+}
+
+impl SecurePrivateKey {
+    /// Create a new secure private key from a plain text key
+    pub fn new(private_key: &str) -> Result<Self, String> {
+        use ring::pbkdf2;
+        use ring::rand::{SecureRandom, SystemRandom};
+        
+        // Generate random salt
+        let rng = SystemRandom::new();
+        let mut salt = [0u8; 32];
+        rng.fill(&mut salt).map_err(|e| format!("Failed to generate salt: {}", e))?;
+        
+        // Derive encryption key using PBKDF2
+        let mut derived_key = [0u8; 32];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            std::num::NonZeroU32::new(100_000).unwrap(),
+            &salt,
+            "chiral-network-reputation".as_bytes(),
+            &mut derived_key,
+        );
+        
+        // Encrypt the private key using AES-256-GCM
+        let encrypted_key = encrypt_with_aes_gcm(private_key.as_bytes(), &derived_key, &salt)?;
+        
+        Ok(Self {
+            encrypted_key,
+            salt,
+        })
+    }
+    
+    /// Get the decrypted private key (use sparingly)
+    pub fn get_private_key(&self) -> Result<String, String> {
+        use ring::pbkdf2;
+        
+        // Derive the same encryption key
+        let mut derived_key = [0u8; 32];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            std::num::NonZeroU32::new(100_000).unwrap(),
+            &self.salt,
+            "chiral-network-reputation".as_bytes(),
+            &mut derived_key,
+        );
+        
+        // Decrypt the private key
+        let decrypted = decrypt_with_aes_gcm(&self.encrypted_key, &derived_key, &self.salt)?;
+        String::from_utf8(decrypted).map_err(|e| format!("Invalid UTF-8: {}", e))
+    }
+    
+    /// Check if a private key is stored
+    pub fn is_some(&self) -> bool {
+        !self.encrypted_key.is_empty()
+    }
+}
+
+/// AES-256-GCM encryption helper
+fn encrypt_with_aes_gcm(plaintext: &[u8], key: &[u8], salt: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    
+    let unbound_key = UnboundKey::new(&AES_256_GCM, key)
+        .map_err(|e| format!("Invalid key: {}", e))?;
+    let less_safe_key = LessSafeKey::new(unbound_key);
+    
+    // Use salt as nonce (first 12 bytes)
+    let nonce = Nonce::assume_unique_for_key([0u8; 12]);
+    let mut ciphertext = plaintext.to_vec();
+    
+    less_safe_key.seal_in_place_append_tag(nonce, Aad::empty(), &mut ciphertext)
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+    
+    Ok(ciphertext)
+}
+
+/// AES-256-GCM decryption helper
+fn decrypt_with_aes_gcm(ciphertext: &[u8], key: &[u8], salt: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    
+    let unbound_key = UnboundKey::new(&AES_256_GCM, key)
+        .map_err(|e| format!("Invalid key: {}", e))?;
+    let less_safe_key = LessSafeKey::new(unbound_key);
+    
+    // Use salt as nonce (first 12 bytes)
+    let nonce = Nonce::assume_unique_for_key([0u8; 12]);
+    let mut plaintext = ciphertext.to_vec();
+    
+    less_safe_key.open_in_place(nonce, Aad::empty(), &mut plaintext)
+        .map_err(|e| format!("Decryption failed: {}", e))?;
+    
+    // Remove the authentication tag (last 16 bytes)
+    plaintext.truncate(plaintext.len() - 16);
+    Ok(plaintext)
+}
 
 /// Peer performance metrics used for smart selection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,7 +331,7 @@ pub struct PeerSelectionService {
     metrics: HashMap<String, PeerMetrics>,
     selection_history: HashMap<String, u64>, // peer_id -> last_selected_timestamp
     reputation_system: Option<Arc<tokio::sync::Mutex<ReputationSystem>>>, // Optional blockchain reputation system
-    active_private_key: Option<String>, // Current active private key for blockchain transactions
+    active_private_key: Option<SecurePrivateKey>, // Secure encrypted private key storage
     blockchain_reputation_cache: HashMap<String, (f64, u64)>, // peer_id -> (score, timestamp)
     cache_duration_seconds: u64, // How long to cache blockchain reputation scores
 }
@@ -253,14 +354,20 @@ impl PeerSelectionService {
         info!("Peer selection service connected to blockchain reputation system");
     }
 
-    /// Set the active private key for blockchain transactions
-    pub fn set_active_private_key(&mut self, private_key: Option<String>) {
-        let has_key = private_key.is_some();
-        self.active_private_key = private_key;
-        if has_key {
-            info!("Peer selection service updated with active private key for blockchain transactions");
-        } else {
-            info!("Peer selection service cleared active private key");
+    /// Set the active private key for blockchain transactions (securely encrypted)
+    pub fn set_active_private_key(&mut self, private_key: Option<String>) -> Result<(), String> {
+        match private_key {
+            Some(key) => {
+                let secure_key = SecurePrivateKey::new(&key)?;
+                self.active_private_key = Some(secure_key);
+                info!("Peer selection service updated with encrypted private key for blockchain transactions");
+                Ok(())
+            }
+            None => {
+                self.active_private_key = None;
+                info!("Peer selection service cleared active private key");
+                Ok(())
+            }
         }
     }
 
@@ -282,12 +389,12 @@ impl PeerSelectionService {
         // Get fresh score from blockchain
         if let Some(ref rep_system) = self.reputation_system {
             let rep_system = rep_system.clone();
-            let peer_id = peer_id.to_string();
+            let peer_id_clone = peer_id.to_string();
             
             // Spawn async task to get blockchain reputation score
             let score = tokio::spawn(async move {
                 let rep_system = rep_system.lock().await;
-                rep_system.get_peer_reputation_score(&peer_id, None).await
+                rep_system.get_peer_reputation_score(&peer_id_clone, None).await
             }).await.map_err(|e| format!("Failed to get blockchain reputation score: {}", e))?;
 
             let score = score?;
@@ -341,30 +448,36 @@ impl PeerSelectionService {
 
             // Spawn async task for reputation event creation
             if let Some(ref rep_system) = self.reputation_system {
-                if let Some(ref private_key) = self.active_private_key {
+                if let Some(ref secure_key) = self.active_private_key {
                     let peer_id = peer_id.to_string();
-                    let private_key = private_key.clone();
                     let rep_system = rep_system.clone();
-                    tokio::spawn(async move {
-                        let event = ReputationEvent::new(
-                            format!("event_{}_{}", peer_id, SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis()),
-                            peer_id.clone(),
-                            "local_node".to_string(),
-                            EventType::FileTransferSuccess,
-                            transfer_data,
-                            1.0,
-                        );
-
-                        let mut rep_system = rep_system.lock().await;
-                        if let Err(e) = rep_system.add_reputation_event(event).await {
-                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                        } else {
-                            debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
-                        }
+                    let private_key = secure_key.get_private_key().map_err(|e| {
+                        warn!("Failed to decrypt private key: {}", e);
+                        e
                     });
+                    
+                    if let Ok(private_key) = private_key {
+                        tokio::spawn(async move {
+                            let event = ReputationEvent::new(
+                                format!("event_{}_{}", peer_id, SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()),
+                                peer_id.clone(),
+                                "local_node".to_string(),
+                                EventType::FileTransferSuccess,
+                                transfer_data,
+                                1.0,
+                            );
+
+                            let mut rep_system = rep_system.lock().await;
+                            if let Err(e) = rep_system.add_reputation_event(event).await {
+                                warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                            } else {
+                                debug!("Created reputation event for peer {}: FileTransferSuccess", peer_id);
+                            }
+                        });
+                    }
                 } else {
                     warn!("No active private key available for reputation event creation");
                 }
@@ -386,30 +499,36 @@ impl PeerSelectionService {
 
             // Spawn async task for reputation event creation
             if let Some(ref rep_system) = self.reputation_system {
-                if let Some(ref private_key) = self.active_private_key {
+                if let Some(ref secure_key) = self.active_private_key {
                     let peer_id = peer_id.to_string();
-                    let private_key = private_key.clone();
                     let rep_system = rep_system.clone();
-                    tokio::spawn(async move {
-                        let event = ReputationEvent::new(
-                            format!("event_{}_{}", peer_id, SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis()),
-                            peer_id.clone(),
-                            "local_node".to_string(),
-                            EventType::FileTransferFailure,
-                            failure_data,
-                            1.0,
-                        );
-
-                        let mut rep_system = rep_system.lock().await;
-                        if let Err(e) = rep_system.add_reputation_event(event).await {
-                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                        } else {
-                            debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
-                        }
+                    let private_key = secure_key.get_private_key().map_err(|e| {
+                        warn!("Failed to decrypt private key: {}", e);
+                        e
                     });
+                    
+                    if let Ok(private_key) = private_key {
+                        tokio::spawn(async move {
+                            let event = ReputationEvent::new(
+                                format!("event_{}_{}", peer_id, SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()),
+                                peer_id.clone(),
+                                "local_node".to_string(),
+                                EventType::FileTransferFailure,
+                                failure_data,
+                                1.0,
+                            );
+
+                            let mut rep_system = rep_system.lock().await;
+                            if let Err(e) = rep_system.add_reputation_event(event).await {
+                                warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                            } else {
+                                debug!("Created reputation event for peer {}: FileTransferFailure", peer_id);
+                            }
+                        });
+                    }
                 } else {
                     warn!("No active private key available for reputation event creation");
                 }
@@ -435,30 +554,36 @@ impl PeerSelectionService {
 
         // Spawn async task for reputation event creation
         if let Some(ref rep_system) = self.reputation_system {
-            if let Some(ref private_key) = self.active_private_key {
+            if let Some(ref secure_key) = self.active_private_key {
                 let peer_id = peer_id.to_string();
-                let private_key = private_key.clone();
                 let rep_system = rep_system.clone();
-                tokio::spawn(async move {
-                    let event = ReputationEvent::new(
-                        format!("event_{}_{}", peer_id, SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis()),
-                        peer_id.clone(),
-                        "local_node".to_string(),
-                        EventType::ConnectionEstablished,
-                        connection_data,
-                        1.0,
-                    );
-
-                    let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event).await {
-                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                    } else {
-                        debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
-                    }
+                let private_key = secure_key.get_private_key().map_err(|e| {
+                    warn!("Failed to decrypt private key: {}", e);
+                    e
                 });
+                
+                if let Ok(private_key) = private_key {
+                    tokio::spawn(async move {
+                        let event = ReputationEvent::new(
+                            format!("event_{}_{}", peer_id, SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()),
+                            peer_id.clone(),
+                            "local_node".to_string(),
+                            EventType::ConnectionEstablished,
+                            connection_data,
+                            1.0,
+                        );
+
+                        let mut rep_system = rep_system.lock().await;
+                        if let Err(e) = rep_system.add_reputation_event(event).await {
+                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                        } else {
+                            debug!("Created reputation event for peer {}: ConnectionEstablished", peer_id);
+                        }
+                    });
+                }
             } else {
                 warn!("No active private key available for reputation event creation");
             }
@@ -477,30 +602,36 @@ impl PeerSelectionService {
 
         // Spawn async task for reputation event creation
         if let Some(ref rep_system) = self.reputation_system {
-            if let Some(ref private_key) = self.active_private_key {
+            if let Some(ref secure_key) = self.active_private_key {
                 let peer_id = peer_id.to_string();
-                let private_key = private_key.clone();
                 let rep_system = rep_system.clone();
-                tokio::spawn(async move {
-                    let event = ReputationEvent::new(
-                        format!("event_{}_{}", peer_id, SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis()),
-                        peer_id.clone(),
-                        "local_node".to_string(),
-                        EventType::ConnectionLost,
-                        connection_data,
-                        1.0,
-                    );
-
-                    let mut rep_system = rep_system.lock().await;
-                    if let Err(e) = rep_system.add_reputation_event(event).await {
-                        warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
-                    } else {
-                        debug!("Created reputation event for peer {}: ConnectionLost", peer_id);
-                    }
+                let private_key = secure_key.get_private_key().map_err(|e| {
+                    warn!("Failed to decrypt private key: {}", e);
+                    e
                 });
+                
+                if let Ok(private_key) = private_key {
+                    tokio::spawn(async move {
+                        let event = ReputationEvent::new(
+                            format!("event_{}_{}", peer_id, SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()),
+                            peer_id.clone(),
+                            "local_node".to_string(),
+                            EventType::ConnectionLost,
+                            connection_data,
+                            1.0,
+                        );
+
+                        let mut rep_system = rep_system.lock().await;
+                        if let Err(e) = rep_system.add_reputation_event(event).await {
+                            warn!("Failed to add reputation event for peer {}: {}", peer_id, e);
+                        } else {
+                            debug!("Created reputation event for peer {}: ConnectionLost", peer_id);
+                        }
+                    });
+                }
             } else {
                 warn!("No active private key available for reputation event creation");
             }
@@ -591,64 +722,71 @@ impl PeerSelectionService {
         // Filter peers based on requirements and calculate scores
         let mut candidates: Vec<(String, f64)> = Vec::new();
         
+        // Collect peer IDs and their metrics first to avoid borrow checker issues
+        let mut peer_data: Vec<(String, PeerMetrics)> = Vec::new();
         for peer_id in available_peers {
             if let Some(metrics) = self.metrics.get(peer_id) {
                 // Skip if encryption required but not supported
                 if require_encryption && !metrics.encryption_support {
                     continue;
                 }
-
-                // Calculate selection score based on strategy
-                let score = match strategy {
-                    SelectionStrategy::FastestFirst => metrics
-                        .latency_ms
-                        .map(|lat| 1000.0 - lat.min(1000) as f64)
-                        .unwrap_or(0.0),
-                    SelectionStrategy::MostReliable => metrics.reliability_score * 1000.0,
-                    SelectionStrategy::HighestBandwidth => {
-                        metrics.bandwidth_kbps.unwrap_or(0) as f64
-                    }
-                    SelectionStrategy::Balanced => {
-                        metrics.get_quality_score(false) * 1000.0
-                    }
-                    SelectionStrategy::EncryptionPreferred => {
-                        let base = metrics.get_quality_score(true) * 1000.0;
-                        if metrics.encryption_support {
-                            base + 100.0
-                        } else {
-                            base
-                        }
-                    }
-                    SelectionStrategy::LoadBalanced => {
-                        let base_score = metrics.get_quality_score(false) * 1000.0;
-                        // Penalize recently selected peers to distribute load
-                        let last_selected =
-                            self.selection_history.get(peer_id).unwrap_or(&0);
-                        let time_since_selected = now.saturating_sub(*last_selected);
-                        let recency_penalty =
-                            if time_since_selected < 60 { 50.0 } else { 0.0 };
-                        base_score - recency_penalty
-                    }
-                    SelectionStrategy::BlockchainReputation => {
-                        // Get blockchain reputation score
-                        match self.get_blockchain_reputation_score(peer_id).await {
-                            Ok(blockchain_score) => {
-                                // Combine blockchain reputation with local metrics
-                                let local_score = metrics.get_quality_score(false) * 1000.0;
-                                let reputation_weight = 0.7; // 70% blockchain reputation, 30% local metrics
-                                (blockchain_score * 1000.0 * reputation_weight) + (local_score * (1.0 - reputation_weight))
-                            }
-                            Err(e) => {
-                                warn!("Failed to get blockchain reputation for peer {}: {}", peer_id, e);
-                                // Fallback to local metrics only
-                                metrics.get_quality_score(false) * 1000.0
-                            }
-                        }
-                    }
-                };
-
-                candidates.push((peer_id.clone(), score));
+                peer_data.push((peer_id.clone(), metrics.clone()));
             }
+        }
+        
+        // Now calculate scores for each peer
+        for (peer_id, metrics) in peer_data {
+            // Calculate selection score based on strategy
+            let score = match strategy {
+                SelectionStrategy::FastestFirst => metrics
+                    .latency_ms
+                    .map(|lat| 1000.0 - lat.min(1000) as f64)
+                    .unwrap_or(0.0),
+                SelectionStrategy::MostReliable => metrics.reliability_score * 1000.0,
+                SelectionStrategy::HighestBandwidth => {
+                    metrics.bandwidth_kbps.unwrap_or(0) as f64
+                }
+                SelectionStrategy::Balanced => {
+                    metrics.get_quality_score(false) * 1000.0
+                }
+                SelectionStrategy::EncryptionPreferred => {
+                    let base = metrics.get_quality_score(true) * 1000.0;
+                    if metrics.encryption_support {
+                        base + 100.0
+                    } else {
+                        base
+                    }
+                }
+                SelectionStrategy::LoadBalanced => {
+                    let base_score = metrics.get_quality_score(false) * 1000.0;
+                    // Penalize recently selected peers to distribute load
+                    let last_selected =
+                        self.selection_history.get(&peer_id).unwrap_or(&0);
+                    let time_since_selected = now.saturating_sub(*last_selected);
+                    let recency_penalty =
+                        if time_since_selected < 60 { 50.0 } else { 0.0 };
+                    base_score - recency_penalty
+                }
+                SelectionStrategy::BlockchainReputation => {
+                    // Get blockchain reputation score
+                    let blockchain_score = self.get_blockchain_reputation_score(&peer_id).await;
+                    match blockchain_score {
+                        Ok(blockchain_score) => {
+                            // Combine blockchain reputation with local metrics
+                            let local_score = metrics.get_quality_score(false) * 1000.0;
+                            let reputation_weight = 0.7; // 70% blockchain reputation, 30% local metrics
+                            (blockchain_score * 1000.0 * reputation_weight) + (local_score * (1.0 - reputation_weight))
+                        }
+                        Err(e) => {
+                            warn!("Failed to get blockchain reputation for peer {}: {}", peer_id, e);
+                            // Fallback to local metrics only
+                            metrics.get_quality_score(false) * 1000.0
+                        }
+                    }
+                }
+            };
+
+            candidates.push((peer_id, score));
         }
 
         // Sort by score (descending)

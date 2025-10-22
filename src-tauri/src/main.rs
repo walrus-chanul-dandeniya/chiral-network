@@ -21,6 +21,7 @@ mod pool;
 mod proxy_latency;
 mod stream_auth;
 mod webrtc_service;
+mod reputation;
 use std::sync::Mutex as StdMutex;
 
 use crate::commands::bootstrap::get_bootstrap_nodes_command;
