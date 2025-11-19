@@ -273,7 +273,7 @@
         lastChecked = new Date();
       }
     } catch (error) {
-      console.error("Storage check failed:", error);
+      errorLogger.fileOperationError('Storage check', error instanceof Error ? error.message : String(error));
       storageError =
         error instanceof Error && error.message.includes("timeout")
           ? "Storage check timed out"
@@ -387,7 +387,7 @@
               return;
             }
           } catch (error) {
-            console.error("Failed to verify account status:", error);
+            errorLogger.fileOperationError('Verify account status', error instanceof Error ? error.message : String(error));
             showToast(
               // "Failed to verify account status. Please try logging in again.",
               tr('toasts.upload.verifyAccountFailed'),
@@ -500,7 +500,7 @@
                   "success"
                 );
               } catch (error) {
-                console.error("Error uploading dropped file:", file.name, error);
+                errorLogger.fileOperationError('Upload dropped file', error instanceof Error ? error.message : String(error));
                 showToast(
                   tr("upload.fileFailed", {
                     values: { name: file.name, error: String(error) },
@@ -524,7 +524,7 @@
               setTimeout(() => refreshAvailableStorage(), 100);
             }
           } catch (error) {
-            console.error("Error handling dropped files:", error);
+            errorLogger.fileOperationError('Handle dropped files', error instanceof Error ? error.message : String(error));
             showToast(
               tr("upload.uploadError"),
               "error",
@@ -590,7 +590,7 @@
     if (persistTimeout) clearTimeout(persistTimeout);
     persistTimeout = setTimeout(() => {
       saveSeedList(seeds).catch((e) =>
-        console.warn("Failed to persist seed list", e),
+        diagnosticLogger.warn('Upload', 'Failed to persist seed list', { error: e instanceof Error ? e.message : String(e) }),
       );
     }, 400);
   });
@@ -654,14 +654,14 @@
     try {
       try {
         await invoke("stop_publishing_file", { fileHash });
-        console.log("File unpublished from DHT:", fileHash);
+        fileLogger.uploadCompleted(fileHash);
       } catch (unpublishError) {
-        console.warn("Failed to unpublish file from DHT:", unpublishError);
+        diagnosticLogger.warn('Upload', 'Failed to unpublish file from DHT', { fileHash, error: unpublishError instanceof Error ? unpublishError.message : String(unpublishError) });
       }
 
       files.update((f) => f.filter((file) => file.hash !== fileHash));
     } catch (error) {
-      console.error(error);
+      errorLogger.fileOperationError('Unpublish file', error instanceof Error ? error.message : String(error));
       showToast(
         tr("upload.fileFailed", {
           values: { name: fileHash, error: String(error) },
@@ -812,7 +812,7 @@
           );
         }
       } catch (error) {
-        console.error(error);
+        errorLogger.fileOperationError('Upload file', error instanceof Error ? error.message : String(error));
         showToast(
           tr("upload.fileFailed", {
             values: {
