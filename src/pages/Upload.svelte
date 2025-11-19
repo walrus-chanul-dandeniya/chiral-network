@@ -44,6 +44,7 @@
   import Input from "$lib/components/ui/input.svelte";
   import { selectedProtocol as protocolStore } from "$lib/stores/protocolStore";
   import { paymentService } from '$lib/services/paymentService';
+  import { diagnosticLogger, errorLogger, fileLogger } from '$lib/diagnostics/logger';
 
 
   const tr = (k: string, params?: Record<string, any>): string =>
