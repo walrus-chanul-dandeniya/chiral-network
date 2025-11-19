@@ -614,7 +614,7 @@
           return;
         }
       } catch (error) {
-        console.error("Failed to verify account status:", error);
+        errorLogger.fileOperationError('Verify account status', error instanceof Error ? error.message : String(error));
         showToast(
           // "Failed to verify account status. Please try logging in again.",
           tr('toasts.upload.verifyAccountFailed'),
@@ -685,7 +685,7 @@
           return;
         }
       } catch (error) {
-        console.error("Failed to verify account status:", error);
+        errorLogger.fileOperationError('Verify account status', error instanceof Error ? error.message : String(error));
         showToast(
           // "Failed to verify account status. Please try logging in again.",
           tr('toasts.upload.verifyAccountFailed'),
