@@ -184,7 +184,7 @@
         return Number(dynamicPrice.toFixed(8));
       }
     } catch (error) {
-      console.warn("Dynamic price calculation failed, falling back to static rate:", error);
+      diagnosticLogger.warn('Upload', 'Dynamic price calculation failed, falling back to static rate', { error: error instanceof Error ? error.message : String(error) });
     }
 
     try {
@@ -193,7 +193,7 @@
         return Number((sizeInMB * pricePerMb).toFixed(8));
       }
     } catch (secondaryError) {
-      console.warn("Secondary dynamic price lookup failed:", secondaryError);
+      diagnosticLogger.warn('Upload', 'Secondary dynamic price lookup failed', { error: secondaryError instanceof Error ? secondaryError.message : String(secondaryError) });
     }
 
     const fallbackPricePerMb = 0.001;
@@ -252,7 +252,7 @@
       const storagePromise = fileService
         .getAvailableStorage()
         .catch((error) => {
-          console.warn("Storage service error:", error);
+          diagnosticLogger.warn('Upload', 'Storage service error', { error: error instanceof Error ? error.message : String(error) });
           return null;
         });
 
@@ -301,7 +301,7 @@
     try {
       await clearSeedList();
     } catch (e) {
-      console.warn("Failed to clear persisted seed list", e);
+      diagnosticLogger.warn('Upload', 'Failed to clear persisted seed list', { error: e instanceof Error ? e.message : String(e) });
     }
 
 
@@ -334,7 +334,7 @@
         }
       }
     } catch (e) {
-      console.warn("Failed to restore persisted seed list", e);
+      diagnosticLogger.warn('Upload', 'Failed to restore persisted seed list', { error: e instanceof Error ? e.message : String(e) });
     }
 
     // HTML5 Drag and Drop functionality
